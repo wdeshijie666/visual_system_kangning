@@ -1,0 +1,101 @@
+# --- Build / CMake ---
+build/
+cmake-build-*/
+out/
+install/
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/compile_commands.json
+**/CTestTestfile.cmake
+**/_deps/
+
+# --- Visual Studio / MSVC ---
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+*.sln.docstates
+ipch/
+*.aps
+*.ncb
+*.opt
+*.plg
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.ipdb
+*.iobj
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+!**/third_party/**/*.lib
+!**/third_party/**/*.dll
+
+# --- Qt ---
+**/moc_*.cpp
+**/ui_*.h
+**/qrc_*.cpp
+**/*_autogen/
+**/Makefile*
+*.qmlc
+*.jsc
+
+# --- Runtime / local data (generated under Release/Debug) ---
+**/logs/
+**/dumps/
+**/MvSDKLog/
+**/rvc_calib_export/
+**/data/
+!visual_system/config/
+!**/docs/**
+
+# Ignore captured stubs / large runtime artifacts if ever placed under repo
+*.f64
+*.ply
+*.tiff
+*.tif
+!**/resources/**/*.png
+!**/resources/**/*.qss
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Python (tools / scripts) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# --- Secrets / local overrides ---
+**/config/devices.local.json
+**/config/setting.local.json
+*.pem
+*.key
+credentials.json
+
+# --- Misc ---
+*.log
+*.tmp
+*.temp
+*.bak
+* - 副本.*
+* - 副本.json

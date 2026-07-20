@@ -1,0 +1,22 @@
+{
+  "mode": 0,
+  "debugSaveDepth": false,
+  "debugSavePointcloud": false,
+  "pipelineSimulation": {
+    "enabled": false,
+    "imageWidth": 2040,
+    "imageHeight": 1080,
+    "algoResult": {
+      "status": 1,
+      "offsetX": 0.1,
+      "offsetY": 0,
+      "offsetR": 0,
+      "diameter": 100,
+      "length": 800
+    }
+  },
+  "offlineReplay": {
+    "dataDir": "./offline_data",
+    "resultDir": "./offline_result"
+  }
+}

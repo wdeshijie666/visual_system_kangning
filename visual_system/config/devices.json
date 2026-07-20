@@ -1,0 +1,6 @@
+{
+  "cameras": [
+    { "id": "rvc_01", "type": "rvc", "serial": "STUB_RVC_01", "station": "r05" },
+    { "id": "rvc_02", "type": "rvc", "serial": "STUB_RVC_02", "station": "r09" }
+  ]
+}

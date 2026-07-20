@@ -1,0 +1,45 @@
+{
+  "appName": "Visual System",
+  "logoPath": "./resources/logo.png",
+  "dataPath": "./data",
+  "runMode": "simulation",
+  "plc": {
+    "gateway": "192.168.1.10",
+    "path": "1,0",
+    "tags": {
+      "cameraToPlc": "CameraToPLC_Int",
+      "plcToCamera": "PLCToCamera_Int"
+    }
+  },
+  "stations": {
+    "r05": { "cameras": ["rvc_01"], "robots": ["R05", "R07"] },
+    "r09": { "cameras": ["rvc_02"], "robots": ["R09"] }
+  },
+  "simulation": {
+    "imageWidth": 2040,
+    "imageHeight": 1080,
+    "algoResult": {
+      "status": 1,
+      "offsetX": 0.1,
+      "offsetY": 0,
+      "offsetR": 0,
+      "diameter": 100,
+      "length": 800
+    }
+  },
+  "dataStub": {
+    "saveDepth": true,
+    "savePointcloud": false
+  },
+  "algo": {
+    "shmName": "Local\\VisualSystemAlgo_v2",
+    "timeoutMs": 30000,
+    "useShm": true,
+    "transferDepth": true,
+    "transferPointcloud": false,
+    "debugSaveDepth": false,
+    "debugSavePointcloud": false,
+    "programDir": "alg_program",
+    "programExe": "mock_algo_service.exe"
+  }
+}
