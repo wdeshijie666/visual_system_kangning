@@ -1,5 +1,10 @@
 {
   "mode": 0,
+  "usePointCloudAlgo": true,
+  "pointCloudConfig": "config.json",
+  "pointCloudTopN": 5,
+  "logLevel": "info",
+  "tempForceDepthTiff": "",
   "debugSaveDepth": false,
   "debugSavePointcloud": false,
   "pipelineSimulation": {
@@ -18,5 +23,17 @@
   "offlineReplay": {
     "dataDir": "./offline_data",
     "resultDir": "./offline_result"
+  },
+  "channels": {
+    "r05": {
+      "enabled": true,
+      "shmName": "Local\\VisualSystemAlgo_R05_v3",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v3"
+    },
+    "r09": {
+      "enabled": false,
+      "shmName": "Local\\VisualSystemAlgo_R09_v3",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v3"
+    }
   }
 }

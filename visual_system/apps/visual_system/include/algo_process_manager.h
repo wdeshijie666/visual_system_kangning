@@ -8,7 +8,8 @@
 
 #include "visual/run_mode.h"
 
-/** 管理独立算法进程：与主程序同生命周期，崩溃自动拉起。 */class AlgoProcessManager : public QObject {
+/** 管理独立算法进程：与主程序同生命周期，崩溃自动拉起。 */
+class AlgoProcessManager : public QObject {
   Q_OBJECT
  public:
   explicit AlgoProcessManager(QObject* parent = nullptr);
@@ -40,6 +41,8 @@
   void NotifyStatus(const QString& detail);
   void KillProcess();
   bool SyncAlgoConfigFile();
+  /** 是否已有同名算法 exe 在系统中运行（含外部手动启动）。 */
+  bool IsAlgoExeAlreadyRunning() const;
 
   QProcess process_;
   QTimer restart_timer_;
@@ -49,7 +52,10 @@
   int simulation_image_width_ = 2040;
   int simulation_image_height_ = 1080;
   visual::SimulationResultProfile simulation_algo_result_{};
-  bool intentional_stop_ = false;  bool restart_pending_ = false;
+  bool intentional_stop_ = false;
+  bool restart_pending_ = false;
+  /** 检测到外部已启动的算法进程时置位（本管理器未持有该 QProcess）。 */
+  bool external_running_ = false;
   QVector<qint64> restart_timestamps_ms_;
   static constexpr int kMaxRestartsPerMinute = 5;
   static constexpr int kRestartDelayMs = 2000;

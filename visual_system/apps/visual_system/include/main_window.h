@@ -48,6 +48,14 @@ class MainWindow : public QMainWindow {
   void CaptureWindowLayoutSnapshot();
   void ResetAllSplitters();
   void RunHistoricalReplay(visual::StationId station);
+  /** 后台线程执行手动周期（采图+算法），结束后回 UI 线程清 Busy。 */
+  void StartAsyncOfflineCycle(visual::StationId station);
+  /**
+   * 占用/释放离线操作门禁：Busy 期间禁用手动、回放、启动产线，防止连点与并发。
+   * 产线 Worker 路径不受影响（启动后本就会关掉离线入口）。
+   */
+  void SetOfflineOpBusy(bool busy);
+  void FinishOfflineOp(const QString& status_message);
   void UpdateOfflineTestEnabled(bool enabled);
   /** 更新产线启动/停止按钮的可用性与样式（二者互斥）。 */
   void UpdateEngineControlState(bool running);
@@ -61,6 +69,8 @@ class MainWindow : public QMainWindow {
 
   std::shared_ptr<visual::SequenceEngine> engine_;
   bool simulation_mode_ = false;
+  /** UI 线程标志：手动触发或历史回放异步任务进行中。 */
+  bool offline_op_busy_ = false;
   QSplitter* main_split_ = nullptr;
   QSplitter* center_split_ = nullptr;
   QSplitter* viewport_split_ = nullptr;

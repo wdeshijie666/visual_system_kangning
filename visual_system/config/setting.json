@@ -2,6 +2,7 @@
   "appName": "Visual System",
   "logoPath": "./resources/logo.png",
   "dataPath": "./data",
+  "dataRetentionDays": 7,
   "runMode": "simulation",
   "plc": {
     "gateway": "192.168.1.10",
@@ -12,8 +13,8 @@
     }
   },
   "stations": {
-    "r05": { "cameras": ["rvc_01"], "robots": ["R05", "R07"] },
-    "r09": { "cameras": ["rvc_02"], "robots": ["R09"] }
+    "r05": { "enabled": true, "cameras": ["rvc_01"], "robots": ["R05", "R07"] },
+    "r09": { "enabled": true, "cameras": ["rvc_02"], "robots": ["R09"] }
   },
   "simulation": {
     "imageWidth": 2040,
@@ -40,6 +41,16 @@
     "debugSaveDepth": false,
     "debugSavePointcloud": false,
     "programDir": "alg_program",
-    "programExe": "mock_algo_service.exe"
+    "programExe": "mock_algo_service.exe",
+    "channels": {
+      "r05": {
+        "shmName": "Local\\VisualSystemAlgo_R05_v3",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R05_v3"
+      },
+      "r09": {
+        "shmName": "Local\\VisualSystemAlgo_R09_v3",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R09_v3"
+      }
+    }
   }
 }

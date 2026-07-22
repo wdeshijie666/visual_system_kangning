@@ -8,6 +8,8 @@
 #include <QFrame>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMetaObject>
+#include <QPointer>
 #include <QPushButton>
 #include <QShowEvent>
 #include <QSplitter>
@@ -18,11 +20,14 @@
 #include <QTimer>
 #include <QToolBar>
 
+#include <thread>
+
 #include "camera_manager_widget.h"
 #include "device_status_widget.h"
 #include "offline_test_widget.h"
 #include "station_result_widget.h"
 #include "viewport_widget.h"
+#include "visual/alarm_service.h"
 #include "visual/app_context.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
@@ -226,13 +231,10 @@ void MainWindow::InitUi() {
 
   setCentralWidget(main_split_);
 
-  // 阶段 2 离线触发：实时采图 + SHM + 写 PLC（产线运行中禁用，见 UpdateOfflineTestEnabled）
+  // 手动触发：后台线程跑 RunOfflineCycle，UI 只做 Busy 门禁，避免采图/算法卡住界面
   offline_test_ = new OfflineTestWidget(this);
   offline_test_->SetRunHandler([this](int station) {
-    if (!engine_ || engine_->IsRunning()) {
-      return;
-    }
-    engine_->RunOfflineCycle(static_cast<visual::StationId>(station));
+    StartAsyncOfflineCycle(static_cast<visual::StationId>(station));
   });
   statusBar()->addPermanentWidget(offline_test_);
   UpdateEngineControlState(false);
@@ -241,9 +243,9 @@ void MainWindow::InitUi() {
           &MainWindow::OnCycleCompleted);
   connect(&visual::EventBus::Instance(), &visual::EventBus::LogLine, this, &MainWindow::OnLogLine);
   connect(&visual::EventBus::Instance(), &visual::EventBus::PlcStatusChanged, this,
-          [this](bool connected, bool /*heartbeat*/) {
+          [this](bool connected, bool heartbeat) {
             if (device_status_ != nullptr) {
-              device_status_->SetPlcStatus(connected);
+              device_status_->SetPlcStatus(connected, heartbeat);
             }
             ApplyProductionStartInterlock();
           });
@@ -269,11 +271,13 @@ void MainWindow::InitUi() {
       const bool connected = cam && cam->IsConnected();
       device_status_->SetCameraStatus(QString::fromStdString(kv.second.id), connected);
     }
-    device_status_->SetPlcStatus(engine_->IsPlcConnected());
+    device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   }
 
+  // 勿强制写成“初始化/未运行”：main 里算法可能已启动，信号可能在订阅前发出
   if (visual::AppContext::Instance().Settings().use_shm_algo) {
-    device_status_->SetAlgoStatus(false, simulation_mode_ ? tr("仿真初始化") : tr("初始化"));
+    const bool ready = visual::EventBus::IsAlgoProcessReady();
+    device_status_->SetAlgoStatus(ready, ready ? tr("运行中") : tr("未就绪"));
   } else {
     // 进程内 Mock 视为算法就绪（无独立进程）
     device_status_->SetAlgoStatus(true, simulation_mode_ ? tr("进程内 Mock 仿真") : tr("进程内 Mock"));
@@ -312,6 +316,25 @@ void MainWindow::InitUi() {
       statusBar()->showMessage(tr("配方导入失败"), 5000);
     }
   });
+
+  qRegisterMetaType<visual::AlarmRecord>("visual::AlarmRecord");
+  connect(&visual::AlarmService::Instance(), &visual::AlarmService::AlarmRaised, this,
+          [this](const visual::AlarmRecord& rec) {
+            const QString level = rec.level == visual::AlarmLevel::kCritical
+                                      ? tr("严重")
+                                      : (rec.level == visual::AlarmLevel::kWarning ? tr("警告")
+                                                                                  : tr("信息"));
+            const QString line =
+                QStringLiteral("[%1][%2] %3").arg(level, rec.subsystem, rec.message);
+            OnLogLine(line);
+            statusBar()->showMessage(line, 8000);
+            if (rec.level == visual::AlarmLevel::kCritical) {
+              QApplication::beep();
+              if (engine_) {
+                UpdateEngineControlState(engine_->IsRunning());
+              }
+            }
+          });
 
   statusBar()->showMessage(tr("就绪"));
 }
@@ -369,6 +392,11 @@ void MainWindow::OnStartEngine() {
   if (!engine_ || engine_->IsRunning()) {
     return;
   }
+  // 手动/回放占用中禁止开产线，避免与同工位 CycleMutex / 相机并发
+  if (offline_op_busy_) {
+    statusBar()->showMessage(tr("手动或回放进行中，请等待结束后再启动产线"), 5000);
+    return;
+  }
 
   // 生产模式防呆：PLC / 相机 / 算法任一异常则禁止启动在线运行（手动/离线不受影响）
   if (!simulation_mode_) {
@@ -383,7 +411,8 @@ void MainWindow::OnStartEngine() {
   }
 
   engine_->Start();
-  device_status_->SetPlcStatus(engine_->IsPlcConnected());
+  engine_->ResetFaultBreakers();
+  device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   UpdateEngineControlState(true);
   statusBar()->showMessage(tr("SequenceEngine 已启动（离线测试已禁用）"));
 }
@@ -393,7 +422,7 @@ void MainWindow::OnStopEngine() {
     return;
   }
   engine_->Stop();
-  device_status_->SetPlcStatus(engine_->IsPlcConnected());
+  device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   UpdateEngineControlState(false);
   statusBar()->showMessage(tr("SequenceEngine 已停止"));
 }
@@ -405,9 +434,17 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
     }
   };
 
-  // 以引擎实时状态为准刷新相机
+  const auto& settings = visual::AppContext::Instance().Settings();
+  // 以引擎实时状态为准刷新相机（仅校验已启用工位）
   if (engine_ != nullptr) {
     for (const auto& kv : visual::AppContext::Instance().Devices()) {
+      const bool station_enabled =
+          (kv.second.station == "r09" || kv.second.station == "R09")
+              ? settings.station_r09.enabled
+              : settings.station_r05.enabled;
+      if (!station_enabled) {
+        continue;
+      }
       auto cam = engine_->GetCamera(kv.second.id);
       const bool connected = cam && cam->IsConnected();
       if (device_status_ != nullptr) {
@@ -433,19 +470,25 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
 
   if (!engine_->TryConnectPlc()) {
     if (device_status_ != nullptr) {
-      device_status_->SetPlcStatus(false);
+      device_status_->SetPlcStatus(false, false);
     }
     set_reason(tr("PLC未连接"));
     return false;
   }
   if (device_status_ != nullptr) {
-    device_status_->SetPlcStatus(true);
+    device_status_->SetPlcStatus(true, true);
   }
   return true;
 }
 
 void MainWindow::ApplyProductionStartInterlock() {
   if (start_engine_button_ == nullptr || engine_ == nullptr || engine_->IsRunning()) {
+    return;
+  }
+  // Busy 时强制禁启动，避免与手动周期抢资源
+  if (offline_op_busy_) {
+    start_engine_button_->setEnabled(false);
+    start_engine_button_->setToolTip(tr("手动或回放进行中，无法启动产线"));
     return;
   }
   if (simulation_mode_) {
@@ -472,7 +515,8 @@ void MainWindow::ApplyProductionStartInterlock() {
 
 void MainWindow::UpdateEngineControlState(bool running) {
   if (start_engine_button_ != nullptr) {
-    start_engine_button_->setEnabled(!running);
+    // 产线已跑 或 离线 Busy：都不能点启动
+    start_engine_button_->setEnabled(!running && !offline_op_busy_);
     start_engine_button_->setProperty("running", running);
     start_engine_button_->style()->unpolish(start_engine_button_);
     start_engine_button_->style()->polish(start_engine_button_);
@@ -492,19 +536,77 @@ void MainWindow::UpdateEngineControlState(bool running) {
 }
 
 void MainWindow::UpdateOfflineTestEnabled(bool enabled) {
+  // 产线运行 或 Busy：离线入口一律关闭
+  const bool allow = enabled && !offline_op_busy_;
   if (offline_test_ != nullptr) {
-    offline_test_->SetOfflineTestEnabled(enabled);
+    offline_test_->SetOfflineTestEnabled(allow);
   }
   if (replay_r05_action_ != nullptr) {
-    replay_r05_action_->setEnabled(enabled);
+    replay_r05_action_->setEnabled(allow);
   }
   if (replay_r09_action_ != nullptr) {
-    replay_r09_action_->setEnabled(enabled);
+    replay_r09_action_->setEnabled(allow);
   }
   if (offline_menu_ != nullptr) {
     offline_menu_->setToolTipsVisible(true);
-    offline_menu_->setToolTip(enabled ? QString() : tr("产线运行中，请先停止后再进行离线测试"));
+    if (offline_op_busy_) {
+      offline_menu_->setToolTip(tr("手动或回放进行中，请等待结束"));
+    } else {
+      offline_menu_->setToolTip(enabled ? QString() : tr("产线运行中，请先停止后再进行离线测试"));
+    }
   }
+}
+
+void MainWindow::SetOfflineOpBusy(bool busy) {
+  if (offline_op_busy_ == busy) {
+    return;
+  }
+  offline_op_busy_ = busy;
+  if (offline_test_ != nullptr) {
+    offline_test_->SetBusy(busy);
+  }
+  // 按当前产线状态重算启动/离线入口（内部会读 offline_op_busy_）
+  const bool running = engine_ && engine_->IsRunning();
+  UpdateEngineControlState(running);
+}
+
+void MainWindow::FinishOfflineOp(const QString& status_message) {
+  SetOfflineOpBusy(false);
+  statusBar()->showMessage(status_message, 5000);
+}
+
+void MainWindow::StartAsyncOfflineCycle(visual::StationId station) {
+  if (!engine_ || offline_op_busy_) {
+    return;
+  }
+  if (engine_->IsRunning()) {
+    // 与 OfflineTestWidget 产线禁用双保险
+    statusBar()->showMessage(tr("产线运行中，请先停止后再手动触发"), 5000);
+    return;
+  }
+
+  SetOfflineOpBusy(true);
+  statusBar()->showMessage(tr("手动周期进行中…"));
+
+  // 持有 engine 的 shared_ptr：窗口关闭后周期仍可安全跑完；回 UI 用 invokeMethod，勿在裸线程里 QTimer
+  const auto engine = engine_;
+  QPointer<MainWindow> self(this);
+  std::thread([self, engine, station]() {
+    const bool ok = engine->RunOfflineCycle(station);
+    if (!self) {
+      return;
+    }
+    MainWindow* raw = self.data();
+    QMetaObject::invokeMethod(
+        raw,
+        [self, ok]() {
+          if (!self) {
+            return;
+          }
+          self->FinishOfflineOp(ok ? QObject::tr("手动周期完成") : QObject::tr("手动周期失败"));
+        },
+        Qt::QueuedConnection);
+  }).detach();
 }
 
 void MainWindow::ResetAllSplitters() {
@@ -551,11 +653,16 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
   if (!engine_) {
     return;
   }
-  if (engine_->IsRunning()) {
-    statusBar()->showMessage(tr("产线运行中，无法进行历史回放"));
-    visual::EventBus::Instance().NotifyLog(QStringLiteral("replay blocked: engine is running"));
+  if (offline_op_busy_) {
+    statusBar()->showMessage(tr("手动或回放进行中，请等待结束"), 5000);
     return;
   }
+  if (engine_->IsRunning()) {
+    statusBar()->showMessage(tr("产线运行中，无法进行历史回放"));
+    visual::EventBus::Instance().NotifyLog(QStringLiteral("产线运行中，历史回放已拒绝"));
+    return;
+  }
+  // 目录选择必须在 UI 线程；真正回放放到后台，避免算法阻塞界面
   const QString default_dir =
       QString::fromStdString(visual::ResolveDataRoot(visual::AppContext::Instance().Settings().data_path));
   const QString session_dir =
@@ -563,8 +670,29 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
   if (session_dir.isEmpty()) {
     return;
   }
-  const bool ok = engine_->RunReplayCycle(station, session_dir.toStdString());
-  statusBar()->showMessage(ok ? tr("历史回放完成") : tr("历史回放失败"));
+
+  SetOfflineOpBusy(true);
+  statusBar()->showMessage(tr("历史回放进行中…"));
+
+  const auto engine = engine_;
+  const std::string session = session_dir.toStdString();
+  QPointer<MainWindow> self(this);
+  std::thread([self, engine, station, session]() {
+    const bool ok = engine->RunReplayCycle(station, session);
+    if (!self) {
+      return;
+    }
+    MainWindow* raw = self.data();
+    QMetaObject::invokeMethod(
+        raw,
+        [self, ok]() {
+          if (!self) {
+            return;
+          }
+          self->FinishOfflineOp(ok ? QObject::tr("历史回放完成") : QObject::tr("历史回放失败"));
+        },
+        Qt::QueuedConnection);
+  }).detach();
 }
 
 void MainWindow::OnReplayR05() {

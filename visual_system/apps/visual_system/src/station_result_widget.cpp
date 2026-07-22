@@ -1,5 +1,6 @@
 #include "station_result_widget.h"
 
+#include <QBrush>
 #include <QColor>
 #include <QHeaderView>
 #include <QPalette>
@@ -27,7 +28,13 @@ StationResultWidget::StationResultWidget(const QString& title, QWidget* parent) 
 void StationResultWidget::UpdateResults(const visual::LogResultBatch& logs) {
   for (int i = 0; i < static_cast<int>(logs.size()); ++i) {
     const auto& log = logs[static_cast<std::size_t>(i)];
-    setItem(i, 0, new QTableWidgetItem(QString::number(static_cast<int>(log.status))));
+    auto* status_item = new QTableWidgetItem(QString::number(static_cast<int>(log.status)));
+    if (log.status == visual::InspectStatus::kNg) {
+      status_item->setForeground(QBrush(QColor("#e74c3c")));
+    } else if (log.status == visual::InspectStatus::kOk) {
+      status_item->setForeground(QBrush(QColor("#2ecc71")));
+    }
+    setItem(i, 0, status_item);
     setItem(i, 1, new QTableWidgetItem(QString::number(log.offset_x_mm, 'f', 2)));
     setItem(i, 2, new QTableWidgetItem(QString::number(log.offset_y_mm, 'f', 2)));
     setItem(i, 3, new QTableWidgetItem(QString::number(log.offset_r_deg, 'f', 2)));

@@ -70,6 +70,10 @@ add_custom_command(TARGET VisualSystem POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/mock_algo_service/algo_config.json"
     "$<TARGET_FILE_DIR:VisualSystem>/alg_program/algo_config.json"
+  # 将算法进程旁的 DLL / config.json 一并同步到 alg_program（真实 PointCloud 依赖）
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "$<TARGET_FILE_DIR:mock_algo_service>"
+    "$<TARGET_FILE_DIR:VisualSystem>/alg_program"
   VERBATIM
 )
 

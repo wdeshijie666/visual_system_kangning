@@ -1,8 +1,6 @@
 /**
  * @file algo_input_converter.cpp
- * @brief 算法侧输入转换：SHM blob / 磁盘路径 → 算法 SDK 内部类型（接口预留）。
- *
- * debugSaveDepth / debugSavePointcloud 开启时，将收到的对应模态写入 {exe_dir}/data/。
+ * @brief 算法侧输入校验；可选将深度/点云落盘便于排查。
  */
 #include "algo_input_converter.h"
 
@@ -10,9 +8,9 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
-#include <iostream>
 #include <sstream>
 
+#include "algo_log.h"
 #include "visual/algo_shm_codec.h"
 #include "visual/capture_data_format.h"
 
@@ -98,33 +96,37 @@ bool PrepareAlgoInputFromShm(const visual::shm::ShmHeader* header, const std::ui
 
     if (visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kDepth) &&
         cam.depth.blob_size > 0) {
-      std::cout << "  [stub] depth cam=" << serial << " " << cam.depth.width << "x"
-                << cam.depth.height << " fmt=" << static_cast<std::uint32_t>(cam.depth.format)
-                << " bytes=" << cam.depth.blob_size << '\n';
+      {
+        std::ostringstream oss;
+        oss << "收到深度 " << serial << " " << cam.depth.width << "x" << cam.depth.height;
+        AlgoDebug(oss.str());
+      }
       if (config.debug_save_depth) {
         const auto depth_path = data_dir / (stamp + "_" + serial + "_depth.raw");
         const auto* blob = blob_arena + cam.depth.blob_offset;
         if (WriteDepthRawFile(depth_path, blob, cam.depth.width, cam.depth.height, cam.depth.blob_size,
                               cam.depth.format)) {
-          std::cout << "  [debug] saved depth -> " << depth_path.string() << '\n';
+          AlgoDebug("已保存深度: " + depth_path.string());
         } else {
-          std::cout << "  [debug] save depth FAILED -> " << depth_path.string() << '\n';
+          AlgoError("保存深度失败: " + depth_path.string());
         }
       }
     }
     if (visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kPointCloud) &&
         cam.pointcloud.blob_size > 0) {
-      std::cout << "  [stub] pointcloud cam=" << serial << " points=" << cam.pointcloud.point_count
-                << " fmt=" << static_cast<std::uint32_t>(cam.pointcloud.format)
-                << " bytes=" << cam.pointcloud.blob_size << '\n';
+      {
+        std::ostringstream oss;
+        oss << "收到点云 " << serial << " 点数=" << cam.pointcloud.point_count;
+        AlgoDebug(oss.str());
+      }
       if (config.debug_save_pointcloud) {
         const auto ply_path = data_dir / (stamp + "_" + serial + "_pointcloud.ply");
         const auto* blob = blob_arena + cam.pointcloud.blob_offset;
         if (WritePointCloudPlyFile(ply_path, blob, cam.pointcloud.point_count,
                                    static_cast<visual::PointCloudFormat>(cam.pointcloud.format))) {
-          std::cout << "  [debug] saved pointcloud -> " << ply_path.string() << '\n';
+          AlgoDebug("已保存点云: " + ply_path.string());
         } else {
-          std::cout << "  [debug] save pointcloud FAILED -> " << ply_path.string() << '\n';
+          AlgoError("保存点云失败: " + ply_path.string());
         }
       }
     }
@@ -135,18 +137,18 @@ bool PrepareAlgoInputFromShm(const visual::shm::ShmHeader* header, const std::ui
 bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string* error) {
   if (header == nullptr) {
     if (error != nullptr) {
-      *error = "null header";
+      *error = "请求无效";
     }
     return false;
   }
   if (header->session_dir[0] == '\0') {
     if (error != nullptr) {
-      *error = "empty session_dir";
+      *error = "回放目录为空";
     }
     return false;
   }
 
-  std::cout << "  [stub] offline load from: " << header->session_dir << '\n';
+  AlgoDebug(std::string("离线回放目录: ") + header->session_dir);
   return true;
 }
 

@@ -6,6 +6,7 @@
 #include "visual/rvc_camera_adapter.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -452,6 +453,7 @@ class StubRvcCamera final : public ICamera3D {
     info.serial = serial_;
     info.ip = "stub";
     info.connected = connected_;
+    info.is_stub = true;
     return info;
   }
 
@@ -558,108 +560,6 @@ void FillRecipeParamsFromCaptureOptions(const RVC::X2::CaptureOptions& opts, Rec
   AppendRecipeParam(out, "后处理参数", "自动双边滤波", FormatBoolZh(opts.use_auto_bilateral_filter));
 }
 
-// >>> TEMP_RVC_INTRINSIC_EXPORT — 连接成功后导出内参/畸变；整段可删
-fs::path TempRvcExportDir() {
-#ifdef _WIN32
-  wchar_t module_path[MAX_PATH] = {};
-  const DWORD n = GetModuleFileNameW(nullptr, module_path, MAX_PATH);
-  if (n > 0 && n < MAX_PATH) {
-    return fs::path(module_path).parent_path() / "rvc_calib_export";
-  }
-#endif
-  return fs::current_path() / "rvc_calib_export";
-}
-
-void TempAppendFloatArray(std::ostringstream& oss, const float* data, int n) {
-  oss << '[';
-  for (int i = 0; i < n; ++i) {
-    if (i > 0) {
-      oss << ", ";
-    }
-    oss << std::setprecision(9) << data[i];
-  }
-  oss << ']';
-}
-
-void TempAppendCameraIntrinsicsJson(std::ostringstream& oss, const char* label, bool ok,
-                                    const float* K, const float* D, const float* E, bool ext_ok,
-                                    const char* err) {
-  oss << "  \"" << label << "\": {\n";
-  oss << "    \"ok\": " << (ok ? "true" : "false") << ",\n";
-  if (ok) {
-    oss << "    \"K_row_major\": ";
-    TempAppendFloatArray(oss, K, 9);
-    oss << ",\n";
-    oss << "    \"fx\": " << std::setprecision(9) << K[0] << ",\n";
-    oss << "    \"fy\": " << std::setprecision(9) << K[4] << ",\n";
-    oss << "    \"cx\": " << std::setprecision(9) << K[2] << ",\n";
-    oss << "    \"cy\": " << std::setprecision(9) << K[5] << ",\n";
-    oss << "    \"distortion_k1_k2_k3_p1_p2\": ";
-    TempAppendFloatArray(oss, D, 5);
-    oss << ",\n";
-  } else if (err != nullptr && err[0] != '\0') {
-    oss << "    \"error\": \"" << err << "\",\n";
-  }
-  oss << "    \"extrinsic_calib_board_to_camera_ok\": " << (ext_ok ? "true" : "false");
-  if (ext_ok) {
-    oss << ",\n    \"extrinsic_calib_board_to_camera_4x4\": ";
-    TempAppendFloatArray(oss, E, 16);
-  }
-  oss << "\n  }";
-}
-
-/** 临时：调用 X2::GetIntrinsicParameters 写出标定内参 JSON，不影响业务返回值。 */
-void TempExportRvcIntrinsicsAfterConnect(RVC::X2& cam, const std::string& camera_id,
-                                         const std::string& serial) {
-  struct Side {
-    const char* label;
-    RVC::CameraID cid;
-  };
-  const Side sides[] = {
-      {"left", RVC::CameraID_Left},
-      {"right", RVC::CameraID_Right},
-  };
-
-  std::ostringstream body;
-  body << std::setprecision(9);
-  body << "{\n";
-  body << "  \"camera_id\": \"" << camera_id << "\",\n";
-  body << "  \"serial\": \"" << serial << "\",\n";
-  body << "  \"sdk\": \"RVC X2 GetIntrinsicParameters\",\n";
-  body << "  \"note\": \"K=[fx,0,cx, 0,fy,cy, 0,0,1]; distortion=[k1,k2,k3,p1,p2] "
-          "(RVC order, not OpenCV default k1,k2,p1,p2,k3)\",\n";
-
-  for (std::size_t i = 0; i < sizeof(sides) / sizeof(sides[0]); ++i) {
-    float K[9] = {};
-    float D[5] = {};
-    float E[16] = {};
-    const bool ok = cam.GetIntrinsicParameters(sides[i].cid, K, D);
-    const bool ext_ok = cam.GetExtrinsicMatrix(sides[i].cid, E);
-    if (i > 0) {
-      body << ",\n";
-    }
-    TempAppendCameraIntrinsicsJson(body, sides[i].label, ok, K, D, E, ext_ok,
-                                   ok ? "" : RVC::GetLastErrorMessage());
-  }
-  body << "\n}\n";
-
-  std::error_code ec;
-  const fs::path dir = TempRvcExportDir();
-  fs::create_directories(dir, ec);
-  const fs::path out_path = dir / ("intrinsics_" + serial + ".json");
-  {
-#ifdef _WIN32
-    std::ofstream ofs(out_path.wstring().c_str(), std::ios::binary | std::ios::trunc);
-#else
-    std::ofstream ofs(out_path, std::ios::binary | std::ios::trunc);
-#endif
-    if (ofs) {
-      ofs << body.str();
-    }
-  }
-}
-// <<< TEMP_RVC_INTRINSIC_EXPORT
-
 std::mutex& RvcSystemMutex() {
   static std::mutex mtx;
   return mtx;
@@ -702,19 +602,34 @@ class RvcCamera final : public ICamera3D {
     if (connected_) {
       return true;
     }
+    auto log_fail = [this](const char* step) {
+      const char* msg = RVC::GetLastErrorMessage();
+      std::fprintf(stderr, "[相机] 连接失败 id=%s sn=%s (%s) %s\n", id_.c_str(), serial_.c_str(),
+                   step, msg ? msg : "");
+      std::fflush(stderr);
+    };
+
     if (!EnsureRvcSystemInit()) {
+      log_fail("初始化");
       return false;
     }
     system_inited_ = true;
 
     device_ = RVC::SystemFindDevice(serial_.c_str());
     if (!device_.IsValid()) {
+      RVC::Device listed[16];
+      size_t actual = 0;
+      RVC::SystemListDevices(listed, 16, &actual, RVC::SystemListDeviceType::All);
+      std::fprintf(stderr, "[相机] 未找到序列号=%s，当前在线=%zu 台\n", serial_.c_str(), actual);
+      std::fflush(stderr);
+      log_fail("查找设备");
       ReleaseRvcSystemInit();
       system_inited_ = false;
       return false;
     }
     cam_ = RVC::X2::Create(device_);
     if (!cam_.has_value() || !cam_->IsValid() || !cam_->Open()) {
+      log_fail(cam_.has_value() && cam_->IsValid() ? "打开" : "创建");
       if (cam_.has_value()) {
         RVC::X2::Destroy(*cam_);
         cam_.reset();
@@ -728,9 +643,21 @@ class RvcCamera final : public ICamera3D {
       return false;
     }
     connected_ = true;
-    // >>> TEMP_RVC_INTRINSIC_EXPORT
-    TempExportRvcIntrinsicsAfterConnect(*cam_, id_, serial_);
-    // <<< TEMP_RVC_INTRINSIC_EXPORT
+    // 连接后缓存机内采集参数（含机型实际支持的 capture_mode），并强制软件触发
+    {
+      RVC::X2::CaptureOptions opts;
+      if (cam_->LoadCaptureOptionParameters(opts)) {
+        opts.trigger_mode = RVC::TriggerMode_SoftWare;
+        recipe_opts_ = opts;
+        has_recipe_opts_ = true;
+      } else {
+        RVC::X2::CaptureOptions fallback;
+        fallback.capture_mode = PickSupportedCaptureMode();
+        fallback.trigger_mode = RVC::TriggerMode_SoftWare;
+        recipe_opts_ = fallback;
+        has_recipe_opts_ = true;
+      }
+    }
     return true;
   }
 
@@ -760,7 +687,76 @@ class RvcCamera final : public ICamera3D {
     info.id = id_;
     info.serial = serial_;
     info.connected = connected_;
+    info.is_stub = false;
     return info;
+  }
+
+  /** 采图失败后 Close/Open，避免 SDK 进入 “Device can not get status”。 */
+  bool ReopenCamera() {
+    if (!cam_.has_value()) {
+      return false;
+    }
+    cam_->Close();
+    if (!cam_->Open()) {
+      connected_ = false;
+      const char* msg = RVC::GetLastErrorMessage();
+      std::fprintf(stderr, "[相机] 重新打开失败 id=%s sn=%s %s\n", id_.c_str(), serial_.c_str(),
+                   msg ? msg : "");
+      std::fflush(stderr);
+      return false;
+    }
+    connected_ = true;
+    return true;
+  }
+
+  /** 选一个设备实际支持的 CaptureMode（G51000 等机型常不支持 Normal/Fast）。 */
+  RVC::CaptureMode PickSupportedCaptureMode() {
+    RVC::DeviceInfo info{};
+    unsigned supported = 0;
+    RVC::Device& dev = device_;
+    if (dev.IsValid() && dev.GetDeviceInfo(&info)) {
+      supported = static_cast<unsigned>(info.support_capture_mode);
+    }
+    const RVC::CaptureMode prefer[] = {
+        RVC::CaptureMode_Ultra,
+        RVC::CaptureMode_AntiInterReflection,
+        RVC::CaptureMode_SwingLineScan,
+        RVC::CaptureMode_Normal,
+        RVC::CaptureMode_Fast,
+        RVC::CaptureMode_FixedLineScan,
+        RVC::CaptureMode_LineArrayShift,
+    };
+    for (RVC::CaptureMode m : prefer) {
+      if (supported == 0 || (supported & static_cast<unsigned>(m)) != 0) {
+        return m;
+      }
+    }
+    return RVC::CaptureMode_Ultra;
+  }
+
+  /** 组装软件触发用的 CaptureOptions（优先机内/配方参数）。 */
+  RVC::X2::CaptureOptions BuildSoftCaptureOptions() {
+    RVC::X2::CaptureOptions opts;
+    if (has_recipe_opts_) {
+      opts = recipe_opts_;
+    } else if (cam_.has_value() && cam_->LoadCaptureOptionParameters(opts)) {
+      // keep loaded mode/exposure
+    } else {
+      opts.capture_mode = PickSupportedCaptureMode();
+    }
+    opts.trigger_mode = RVC::TriggerMode_SoftWare;
+    return opts;
+  }
+
+  bool TryCaptureOnce(const RVC::X2::CaptureOptions& opts, const char* step) {
+    const bool ok = cam_->Capture(opts);
+    if (!ok) {
+      const char* msg = RVC::GetLastErrorMessage();
+      std::fprintf(stderr, "[相机] 采图失败 id=%s sn=%s (%s) %s\n", id_.c_str(), serial_.c_str(),
+                   step, msg ? msg : "");
+      std::fflush(stderr);
+    }
+    return ok;
   }
 
   /** 实机：从 RVC SDK 拷贝 DepthMap/PointMap 到内存 buffer（float64 mm）。 */
@@ -768,12 +764,47 @@ class RvcCamera final : public ICamera3D {
     CaptureBundle bundle;
     bundle.camera_serial = serial_;
     if (!connected_ || !cam_.has_value()) {
+      bundle.error_message = "camera not connected";
       return bundle;
     }
-    const bool captured =
-        has_recipe_opts_ ? cam_->Capture(recipe_opts_) : cam_->Capture();
+
+    // 始终软件触发：PLC 边沿 → 本进程 Soft Capture。
+    // 禁止无参 Capture()/默认 Normal：部分机型不支持 Normal，会 Collect Failed。
+    RVC::X2::CaptureOptions opts = BuildSoftCaptureOptions();
+    bool captured = TryCaptureOnce(opts, "primary");
     if (!captured) {
-      return bundle;
+      if (!ReopenCamera()) {
+        bundle.error_message = "Capture failed and reopen failed";
+        return bundle;
+      }
+      // 回退：机内参数再读一次
+      RVC::X2::CaptureOptions loaded;
+      if (cam_->LoadCaptureOptionParameters(loaded)) {
+        loaded.trigger_mode = RVC::TriggerMode_SoftWare;
+        captured = TryCaptureOnce(loaded, "reopen+loaded");
+        if (captured) {
+          recipe_opts_ = loaded;
+          has_recipe_opts_ = true;
+          opts = loaded;
+        }
+      }
+      if (!captured) {
+        RVC::X2::CaptureOptions fallback;
+        fallback.capture_mode = PickSupportedCaptureMode();
+        fallback.trigger_mode = RVC::TriggerMode_SoftWare;
+        captured = TryCaptureOnce(fallback, "reopen+supported-mode");
+        if (captured) {
+          recipe_opts_ = fallback;
+          has_recipe_opts_ = true;
+          opts = fallback;
+        }
+      }
+      if (!captured) {
+        const char* msg = RVC::GetLastErrorMessage();
+        bundle.error_message =
+            std::string("Capture failed: ") + (msg && msg[0] ? msg : "unknown RVC error");
+        return bundle;
+      }
     }
 
     RVC::DepthMap depth = cam_->GetDepthMap();
@@ -844,6 +875,11 @@ class RvcCamera final : public ICamera3D {
     }
 
     bundle.ok = bundle.depth != nullptr;
+    if (!bundle.ok) {
+      bundle.error_message = "Capture ok but DepthMap invalid/empty";
+      std::fprintf(stderr, "[相机] 采图成功但深度为空 id=%s sn=%s\n", id_.c_str(), serial_.c_str());
+      std::fflush(stderr);
+    }
     return bundle;
   }
 
@@ -965,6 +1001,7 @@ class RvcCamera final : public ICamera3D {
 
     RVC::X2::CaptureOptions opts;
     if (cam_->LoadCaptureOptionParameters(opts)) {
+      opts.trigger_mode = RVC::TriggerMode_SoftWare;
       recipe_opts_ = opts;
       has_recipe_opts_ = true;
       if (out_params != nullptr) {
@@ -992,8 +1029,11 @@ class RvcCamera final : public ICamera3D {
 
 CameraPtr CreateRvcCamera(const std::string& id, const std::string& serial, bool force_stub,
                           const StubCameraOptions& stub_options) {
-  if (force_stub) {
-    return std::make_shared<StubRvcCamera>(id, serial, stub_options);
+  // 序列号以 STUB_ 开头：即使 production 也用桩机，避免假序列号导致整盘“相机异常”
+  const bool serial_is_stub =
+      serial.size() >= 5 && (serial.compare(0, 5, "STUB_") == 0 || serial.compare(0, 5, "stub_") == 0);
+  if (force_stub || serial_is_stub || serial.empty()) {
+    return std::make_shared<StubRvcCamera>(id, serial.empty() ? "STUB" : serial, stub_options);
   }
 #ifdef VISUAL_HAS_RVC_SDK
   return std::make_shared<RvcCamera>(id, serial);

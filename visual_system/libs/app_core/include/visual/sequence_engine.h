@@ -2,25 +2,26 @@
  * @file sequence_engine.h
  * @brief 产线编排核心：触发 → 采集 → 算法 → 写 PLC → 通知 UI。
  *
- * 单次周期统一入口：RunCycle()（详见 docs/框架流程通路.md §六）
- *
- * 三种触发方式：
- *   在线产线   WorkerLoop() PLC 20ms 边沿 → RunCycle(capture_live=true,  write_plc=true)
- *   离线测试   RunOfflineCycle()          → RunCycle(capture_live=true,  write_plc=true)
- *   历史回放   RunReplayCycle()           → RunCycle(capture_live=false, write_plc=false)
+ * 双工位并行：单 Poll 线程 + R05/R09 双任务队列 + 双执行线程；
+ * 同工位互斥，异工位可同时 RunCycle。
  */
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 #include "visual/app_context.h"
+#include "visual/cycle_job_queue.h"
+#include "visual/fault_breaker.h"
 #include "visual/i_algo_service.h"
 #include "visual/i_camera_3d.h"
 #include "visual/i_mes_reporter.h"
 #include "visual/i_plc_client.h"
+#include "visual/shm_algo_service.h"
 
 namespace visual {
 
@@ -30,7 +31,10 @@ class SequenceEngine {
   ~SequenceEngine();
 
   void SetPlcClient(std::shared_ptr<IPlcClient> plc);
+  /** 单实例算法（Mock）；同时作为 R05/R09 回退。 */
   void SetAlgoService(std::shared_ptr<IAlgoService> algo);
+  /** 双通道 SHM 算法池（生产路径）。 */
+  void SetAlgoPool(std::shared_ptr<ShmAlgoServicePool> pool);
   void SetMesReporter(std::shared_ptr<IMesReporter> mes);
   void RegisterCamera(const std::string& id, CameraPtr camera);
   CameraPtr GetCamera(const std::string& id) const;
@@ -38,7 +42,7 @@ class SequenceEngine {
   /** 断开并释放全部已注册相机（退出进程前必须调用）。 */
   void DisconnectAllCameras();
 
-  /** 阶段 1 续：连接 PLC、映射 SHM、启动 WorkerLoop 与 CaptureSaveWorker。 */
+  /** 连接 PLC、映射 SHM、启动轮询线程与双周期工作线程。 */
   bool Start();
   void Stop();
   bool IsRunning() const;
@@ -47,44 +51,86 @@ class SequenceEngine {
   bool TryConnectPlc();
   bool IsPlcConnected() const;
 
+  /** 熔断后手动复位（例如操作员确认故障已排除）。 */
+  void ResetFaultBreakers();
+
   /**
    * 离线测试（实时采图）：跳过 PLC 触发，仍走在线 SHM + 写 PLC。
-   * 入口：MainWindow 状态栏 OfflineTestWidget。
+   * 引擎运行中禁止调用。
+   * 可由 UI 后台线程调用；同工位与产线 Worker 通过 CycleMutex 互斥。
    */
   bool RunOfflineCycle(StationId station);
 
   /**
-   * 历史数据回放：不采图，算法走 kOfflinePath（session_dir），不写 PLC。
-   * 入口：MainWindow 菜单「离线测试 → 历史数据回放」。
+   * 历史数据回放：不采图，算法走 kOfflinePath，不写 PLC。
+   * 可由 UI 后台线程调用；同工位互斥同上。
    */
   bool RunReplayCycle(StationId station, const std::string& session_dir);
 
  private:
-  /** 控制 RunCycle 分支：在线采图 / 回放路径 / 是否写 PLC / 结果文件名后缀。 */
   struct CycleOptions {
     bool capture_live = true;
     bool write_plc = true;
     std::string replay_session_dir;
     std::string algo_result_suffix = "algo_result";
+    /**
+     * 手动/离线单通路验证：
+     * - 只写回本工位 PLC（R05 不附带 R07）
+     * - 不更新全局熔断计数
+     * - 采图前对本工位相机尝试一次重连
+     */
+    bool single_station_only = false;
+    bool update_fault_breaker = true;
   };
 
-  /** 阶段 2 在线：20ms 轮询 PLC 触发位，上升沿调用 RunCycle。 */
-  void WorkerLoop();
+  struct PendingCycle {
+    StationId station = StationId::kR05;
+    StationConfig cfg;
+    CycleOptions options;
+  };
 
-  /**
-   * 单次视觉周期主流程（§六）：
-   *   6.1 落盘上下文 → 6.2 采集/路径 → 6.3 算法 → 6.4 失败兜底
-   *   → 6.5 结果 CSV → 6.6 写 PLC → 6.7 MES → 6.8 EventBus 通知 UI
-   */
+  /** 仅做 PLC 边沿检测与设备健康巡检，不执行重活。 */
+  void PollLoop();
+  /** R05 通道周期消费者。 */
+  void CycleWorkerLoopR05();
+  /** R09 通道周期消费者。 */
+  void CycleWorkerLoopR09();
+
   bool RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options);
+
+  IAlgoService* ResolveAlgo(StationId station);
+  std::mutex& CycleMutexFor(StationId station);
+  CycleJobQueue<PendingCycle>& CycleQueueFor(StationId station);
+
+  /** 相机/PLC 巡检与轻量重连。 */
+  void CheckDeviceHealth();
+
+  void OnCycleOutcome(bool capture_ok, bool algo_ok, bool plc_ok, const std::string& cycle_id,
+                      bool update_fault_breaker = true);
+  void NotifyQueuesStop();
 
   std::shared_ptr<IPlcClient> plc_;
   std::shared_ptr<IAlgoService> algo_;
+  std::shared_ptr<ShmAlgoServicePool> algo_pool_;
   std::shared_ptr<IMesReporter> mes_;
   std::map<std::string, CameraPtr> cameras_;
 
   std::atomic<bool> running_{false};
-  std::thread worker_;
+  std::thread poll_thread_;
+  std::thread cycle_thread_r05_;
+  std::thread cycle_thread_r09_;
+  CycleJobQueue<PendingCycle> cycle_queue_r05_{2};
+  CycleJobQueue<PendingCycle> cycle_queue_r09_{2};
+
+  /** 同工位：Worker 与 UI 离线/回放互斥；异工位可并行。 */
+  std::mutex cycle_mutex_r05_;
+  std::mutex cycle_mutex_r09_;
+
+  FaultBreaker capture_breaker_{3};
+  FaultBreaker algo_breaker_{3};
+  FaultBreaker plc_breaker_{3};
+
+  std::chrono::steady_clock::time_point last_health_check_{};
 };
 
 }  // namespace visual

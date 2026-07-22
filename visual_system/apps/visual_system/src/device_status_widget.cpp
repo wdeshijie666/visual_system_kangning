@@ -58,10 +58,12 @@ void DeviceStatusWidget::SetLineStyle(QLabel* label, bool ok) {
 }
 
 void DeviceStatusWidget::RefreshStatusPresentation() {
-  SetLineStyle(plc_label_, plc_ok_);
+  const bool plc_line_ok = plc_ok_ && plc_heartbeat_ok_;
+  SetLineStyle(plc_label_, plc_line_ok);
   SetLineStyle(algo_label_, algo_ok_);
-  SetLineStyle(cam_r05_label_, cam_r05_ok_);
-  SetLineStyle(cam_r09_label_, cam_r09_ok_);
+  const auto& settings = visual::AppContext::Instance().Settings();
+  SetLineStyle(cam_r05_label_, !settings.station_r05.enabled || cam_r05_ok_);
+  SetLineStyle(cam_r09_label_, !settings.station_r09.enabled || cam_r09_ok_);
 
   const bool overall_ok = IsOverallOk();
   if (overall_light_ != nullptr) {
@@ -74,9 +76,16 @@ void DeviceStatusWidget::RefreshStatusPresentation() {
   }
 }
 
-void DeviceStatusWidget::SetPlcStatus(bool connected) {
+void DeviceStatusWidget::SetPlcStatus(bool connected, bool heartbeat) {
   plc_ok_ = connected;
-  plc_label_->setText(connected ? tr("PLC: 已连接") : tr("PLC: 未连接"));
+  plc_heartbeat_ok_ = heartbeat;
+  if (!connected) {
+    plc_label_->setText(tr("PLC: 未连接"));
+  } else if (!heartbeat) {
+    plc_label_->setText(tr("PLC: 已连接(心跳异常)"));
+  } else {
+    plc_label_->setText(tr("PLC: 已连接"));
+  }
   RefreshStatusPresentation();
 }
 
@@ -107,12 +116,17 @@ void DeviceStatusWidget::SetCameraStatus(const QString& id, bool connected) {
                       (station.isEmpty() && (id.contains(QStringLiteral("01")) ||
                                              id.contains(QStringLiteral("rvc_01"), Qt::CaseInsensitive)));
 
+  const auto& settings = visual::AppContext::Instance().Settings();
+  const bool station_enabled = is_r05 ? settings.station_r05.enabled : settings.station_r09.enabled;
+  const QString display =
+      station_enabled ? text : tr("已禁用(%1)").arg(text);
+
   if (is_r05) {
-    cam_r05_ok_ = connected;
-    cam_r05_label_->setText(tr("R05 相机 (%1): %2").arg(id, text));
+    cam_r05_ok_ = !station_enabled || connected;
+    cam_r05_label_->setText(tr("R05 相机 (%1): %2").arg(id, display));
   } else {
-    cam_r09_ok_ = connected;
-    cam_r09_label_->setText(tr("R09 相机 (%1): %2").arg(id, text));
+    cam_r09_ok_ = !station_enabled || connected;
+    cam_r09_label_->setText(tr("R09 相机 (%1): %2").arg(id, display));
   }
   RefreshStatusPresentation();
 }
@@ -121,28 +135,56 @@ bool DeviceStatusWidget::AreCamerasOk() const {
   if (camera_ok_.isEmpty()) {
     return false;
   }
+  const auto& settings = visual::AppContext::Instance().Settings();
+  const auto& devices = visual::AppContext::Instance().Devices();
+  bool any_enabled = false;
   for (auto it = camera_ok_.constBegin(); it != camera_ok_.constEnd(); ++it) {
+    const auto dit = devices.find(it.key().toStdString());
+    bool station_enabled = true;
+    if (dit != devices.end()) {
+      station_enabled = (dit->second.station == "r09" || dit->second.station == "R09")
+                            ? settings.station_r09.enabled
+                            : settings.station_r05.enabled;
+    }
+    if (!station_enabled) {
+      continue;
+    }
+    any_enabled = true;
     if (!it.value()) {
       return false;
     }
   }
-  return true;
+  return any_enabled;
 }
 
 bool DeviceStatusWidget::IsOverallOk() const {
-  return plc_ok_ && algo_ok_ && AreCamerasOk();
+  return plc_ok_ && plc_heartbeat_ok_ && algo_ok_ && AreCamerasOk();
 }
 
 QString DeviceStatusWidget::DescribeFaults() const {
   QStringList faults;
   if (!plc_ok_) {
     faults << tr("PLC未连接");
+  } else if (!plc_heartbeat_ok_) {
+    faults << tr("PLC心跳异常");
   }
   if (!algo_ok_) {
     faults << tr("算法服务异常");
   }
+  const auto& settings = visual::AppContext::Instance().Settings();
+  const auto& devices = visual::AppContext::Instance().Devices();
   for (auto it = camera_ok_.constBegin(); it != camera_ok_.constEnd(); ++it) {
     if (!it.value()) {
+      const auto dit = devices.find(it.key().toStdString());
+      bool station_enabled = true;
+      if (dit != devices.end()) {
+        station_enabled = (dit->second.station == "r09" || dit->second.station == "R09")
+                              ? settings.station_r09.enabled
+                              : settings.station_r05.enabled;
+      }
+      if (!station_enabled) {
+        continue;
+      }
       faults << tr("相机未连接(%1)").arg(it.key());
     }
   }

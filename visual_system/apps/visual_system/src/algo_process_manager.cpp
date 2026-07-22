@@ -12,21 +12,29 @@
 #include <fstream>
 #include <mutex>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <TlHelp32.h>
+#endif
+
 #include "visual/algo_run_mode.h"
 #include "visual/app_context.h"
 #include "visual/event_bus.h"
+#include "visual/rotating_file_log.h"
 #include "visual/run_mode.h"
 
 namespace {
 
+visual::RotatingFileLog& AlgoFileLog() {
+  static visual::RotatingFileLog log("./logs/algo_process.log", 8 * 1024 * 1024);
+  return log;
+}
+
 void AppendAlgoProcessFileLog(const QString& line) {
-  static std::mutex log_mutex;
-  std::lock_guard<std::mutex> lock(log_mutex);
-  std::filesystem::create_directories("./logs");
-  std::ofstream out("./logs/algo_process.log", std::ios::app);
-  if (out.is_open()) {
-    out << line.toStdString() << '\n';
-  }
+  AlgoFileLog().Append(line.toStdString());
 }
 
 QString ProcessErrorText(QProcess::ProcessError error) {
@@ -59,6 +67,17 @@ AlgoProcessManager::AlgoProcessManager(QObject* parent) : QObject(parent) {
   connect(&process_, &QProcess::errorOccurred, this, &AlgoProcessManager::OnProcessError);
   connect(&process_, &QProcess::readyReadStandardOutput, this, &AlgoProcessManager::OnReadyReadStdout);
   connect(&process_, &QProcess::readyReadStandardError, this, &AlgoProcessManager::OnReadyReadStderr);
+
+  // SHM 超时等场景：杀进程后走现有自动拉起逻辑
+  connect(&visual::EventBus::Instance(), &visual::EventBus::RequestAlgoRestart, this,
+          [this](const QString& reason) {
+            LogEvent(tr("收到算法重启请求: %1").arg(reason));
+            NotifyStatus(tr("超时重启中"));
+            KillProcess();
+            if (!intentional_stop_) {
+              ScheduleRestart(reason);
+            }
+          });
 }
 
 AlgoProcessManager::~AlgoProcessManager() {
@@ -105,9 +124,17 @@ bool AlgoProcessManager::Start() {
   }
   intentional_stop_ = false;
   restart_pending_ = false;
+  external_running_ = false;
   restart_timestamps_ms_.clear();
   if (!SyncAlgoConfigFile()) {
     LogEvent(tr("算法配置同步失败，仍将尝试启动进程"));
+  }
+  // 已有同名进程在跑：避免双开抢 SHM，直接认定就绪
+  if (IsAlgoExeAlreadyRunning()) {
+    external_running_ = true;
+    LogEvent(tr("检测到算法进程已在运行，跳过重复拉起"));
+    NotifyStatus(tr("外部已运行"));
+    return true;
   }
   LaunchProcess();
   return process_.state() != QProcess::NotRunning || restart_pending_;
@@ -163,6 +190,33 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
               visual::AppContext::Instance().Settings().algo_debug_save_depth);
   root.insert(QStringLiteral("debugSavePointcloud"),
               visual::AppContext::Instance().Settings().algo_debug_save_pointcloud);
+  // 保留真实算法开关（若文件已有则不强制改写；缺省写 true）
+  if (!root.contains(QStringLiteral("usePointCloudAlgo"))) {
+    root.insert(QStringLiteral("usePointCloudAlgo"), true);
+  }
+  if (!root.contains(QStringLiteral("pointCloudConfig"))) {
+    root.insert(QStringLiteral("pointCloudConfig"), QStringLiteral("config.json"));
+  }
+  if (!root.contains(QStringLiteral("pointCloudTopN"))) {
+    root.insert(QStringLiteral("pointCloudTopN"), 5);
+  }
+
+  // 将视觉侧双通道名同步给算法进程，保证映射名一致
+  const auto& app_settings = visual::AppContext::Instance().Settings();
+  QJsonObject channels;
+  QJsonObject ch_r05;
+  ch_r05.insert(QStringLiteral("enabled"), app_settings.station_r05.enabled);
+  ch_r05.insert(QStringLiteral("shmName"), QString::fromStdString(app_settings.algo_channel_r05.shm_name));
+  ch_r05.insert(QStringLiteral("mutexName"),
+                QString::fromStdString(app_settings.algo_channel_r05.mutex_name));
+  QJsonObject ch_r09;
+  ch_r09.insert(QStringLiteral("enabled"), app_settings.station_r09.enabled);
+  ch_r09.insert(QStringLiteral("shmName"), QString::fromStdString(app_settings.algo_channel_r09.shm_name));
+  ch_r09.insert(QStringLiteral("mutexName"),
+                QString::fromStdString(app_settings.algo_channel_r09.mutex_name));
+  channels.insert(QStringLiteral("r05"), ch_r05);
+  channels.insert(QStringLiteral("r09"), ch_r09);
+  root.insert(QStringLiteral("channels"), channels);
 
   if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
     LogEvent(tr("无法写入算法配置: %1").arg(QDir::toNativeSeparators(config_path)));
@@ -180,11 +234,52 @@ void AlgoProcessManager::Stop() {
   restart_pending_ = false;
   restart_timer_.stop();
   KillProcess();
+  external_running_ = false;
   NotifyStatus(tr("已停止"));
 }
 
 bool AlgoProcessManager::IsRunning() const {
-  return process_.state() == QProcess::Running;
+  if (process_.state() == QProcess::Running) {
+    return true;
+  }
+  // 外部进程：每次查询时复核，退出后清状态
+  if (external_running_) {
+    return IsAlgoExeAlreadyRunning();
+  }
+  return false;
+}
+
+bool AlgoProcessManager::IsAlgoExeAlreadyRunning() const {
+#ifdef _WIN32
+  const QString want = QFileInfo(ResolveExePath()).fileName();
+  if (want.isEmpty()) {
+    return false;
+  }
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  bool found = false;
+  const DWORD self_pid = GetCurrentProcessId();
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      if (pe.th32ProcessID == self_pid) {
+        continue;
+      }
+      const QString name = QString::fromWCharArray(pe.szExeFile);
+      if (QString::compare(name, want, Qt::CaseInsensitive) == 0) {
+        found = true;
+        break;
+      }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  return found;
+#else
+  return false;
+#endif
 }
 
 void AlgoProcessManager::LaunchProcess() {
@@ -268,22 +363,23 @@ void AlgoProcessManager::OnProcessError(QProcess::ProcessError error) {
 }
 
 void AlgoProcessManager::OnReadyReadStdout() {
-  const QString text = QString::fromLocal8Bit(process_.readAllStandardOutput()).trimmed();
+  // 算法进程以 /utf-8 编译，stdout 为 UTF-8；不可用 fromLocal8Bit（会按系统 ANSI 解导致中文乱码）
+  const QString text = QString::fromUtf8(process_.readAllStandardOutput()).trimmed();
   if (text.isEmpty()) {
     return;
   }
   for (const QString& line : text.split('\n', Qt::SkipEmptyParts)) {
-    LogEvent(QStringLiteral("[algo stdout] %1").arg(line));
+    LogEvent(QStringLiteral("[algo] %1").arg(line));
   }
 }
 
 void AlgoProcessManager::OnReadyReadStderr() {
-  const QString text = QString::fromLocal8Bit(process_.readAllStandardError()).trimmed();
+  const QString text = QString::fromUtf8(process_.readAllStandardError()).trimmed();
   if (text.isEmpty()) {
     return;
   }
   for (const QString& line : text.split('\n', Qt::SkipEmptyParts)) {
-    LogEvent(QStringLiteral("[algo stderr] %1").arg(line));
+    LogEvent(QStringLiteral("[algo] %1").arg(line));
   }
 }
 
@@ -346,5 +442,9 @@ void AlgoProcessManager::LogEvent(const QString& line) {
 }
 
 void AlgoProcessManager::NotifyStatus(const QString& detail) {
+  // 外部进程可能已退出：复核后再上报
+  if (external_running_ && process_.state() != QProcess::Running) {
+    external_running_ = IsAlgoExeAlreadyRunning();
+  }
   visual::EventBus::Instance().NotifyAlgoProcessStatus(IsRunning(), detail);
 }

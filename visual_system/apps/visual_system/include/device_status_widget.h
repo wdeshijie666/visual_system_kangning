@@ -9,13 +9,13 @@ class DeviceStatusWidget : public QWidget {
   Q_OBJECT
  public:
   explicit DeviceStatusWidget(QWidget* parent = nullptr);
-  void SetPlcStatus(bool connected);
+  void SetPlcStatus(bool connected, bool heartbeat = true);
   void SetCameraStatus(const QString& id, bool connected);
   void SetAlgoStatus(bool running, const QString& detail);
 
   bool IsPlcOk() const { return plc_ok_; }
   bool IsAlgoOk() const { return algo_ok_; }
-  /** 配置中的全部相机均已连接。 */
+  /** 已启用工位的相机均已连接（stations.*.enabled=false 的工位忽略）。 */
   bool AreCamerasOk() const;
   /** PLC / 相机 / 算法全部正常。 */
   bool IsOverallOk() const;
@@ -33,6 +33,7 @@ class DeviceStatusWidget : public QWidget {
   QLabel* overall_light_ = nullptr;
   QLabel* overall_text_ = nullptr;
   bool plc_ok_ = false;
+  bool plc_heartbeat_ok_ = true;
   bool algo_ok_ = false;
   bool cam_r05_ok_ = false;
   bool cam_r09_ok_ = false;

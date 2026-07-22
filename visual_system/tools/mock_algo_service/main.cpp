@@ -1,14 +1,13 @@
 /**
  * @file main.cpp
- * @brief Mock 算法独立进程：在线 SHM 模式 / 离线历史数据回放模式。
+ * @brief 算法独立进程入口。
  */
 #include <filesystem>
-#include <iostream>
 
 #include "algo_config.h"
+#include "algo_log.h"
 #include "algo_offline_replay.h"
 #include "algo_online_service.h"
-#include "visual/algo_run_mode.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -32,14 +31,21 @@ std::filesystem::path GetExeDir() {
 }  // namespace
 
 int main() {
+#ifdef _WIN32
+  // 管道输出按 UTF-8，供主程序 QString::fromUtf8 正确解析中文
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
   const auto exe_dir = GetExeDir();
   const algo::AlgoConfig config = algo::LoadAlgoConfig(exe_dir);
+  algo::SetAlgoLogLevel(config.log_level);
 
   if (config.mode == algo::RunMode::kOfflineReplay) {
-    std::cout << "algo mode=" << visual::algo_config::kModeOfflineReplay << " (offline replay)\n";
+    algo::AlgoInfo("算法模式: 离线回放");
     return algo::RunOfflineReplay(config);
   }
 
-  std::cout << "algo mode=" << visual::algo_config::kModeOnline << " (online)\n";
+  algo::AlgoInfo(std::string("算法模式: 在线  日志=") +
+                 (config.log_level == algo::LogLevel::kDebug ? "debug" : "info"));
   return algo::RunOnlineService(config);
 }

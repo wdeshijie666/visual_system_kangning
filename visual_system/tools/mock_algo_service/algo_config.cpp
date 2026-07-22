@@ -91,6 +91,29 @@ AlgoConfig LoadAlgoConfig(const std::filesystem::path& exe_dir) {
   ParsePipelineSimulation(j, &config.pipeline_simulation);
   config.debug_save_depth = j.value("debugSaveDepth", false);
   config.debug_save_pointcloud = j.value("debugSavePointcloud", false);
+  config.use_point_cloud_algo = j.value("usePointCloudAlgo", config.use_point_cloud_algo);
+  config.point_cloud_config = j.value("pointCloudConfig", config.point_cloud_config);
+  config.point_cloud_top_n = j.value("pointCloudTopN", config.point_cloud_top_n);
+  config.temp_force_depth_tiff = j.value("tempForceDepthTiff", config.temp_force_depth_tiff);
+  config.log_level = ParseLogLevel(j.value("logLevel", std::string("info")));
+  if (config.point_cloud_top_n < 1) {
+    config.point_cloud_top_n = 5;
+  }
+
+  if (j.contains("channels")) {
+    if (j["channels"].contains("r05")) {
+      const auto& c = j["channels"]["r05"];
+      config.channel_r05.enabled = c.value("enabled", true);
+      config.channel_r05.shm_name = c.value("shmName", config.channel_r05.shm_name);
+      config.channel_r05.mutex_name = c.value("mutexName", config.channel_r05.mutex_name);
+    }
+    if (j["channels"].contains("r09")) {
+      const auto& c = j["channels"]["r09"];
+      config.channel_r09.enabled = c.value("enabled", true);
+      config.channel_r09.shm_name = c.value("shmName", config.channel_r09.shm_name);
+      config.channel_r09.mutex_name = c.value("mutexName", config.channel_r09.mutex_name);
+    }
+  }
   return config;
 }
 

@@ -1,10 +1,9 @@
 /**
  * @file shm_algo_service.cpp
- * @brief 视觉侧算法通道：通过 SHM v2 与独立算法进程通信。
+ * @brief 视觉侧算法通道：每工位独立 SHM + Mutex，与算法进程双线程配对。
  *
  * 在线：WriteRequestToShm 写入 blob → state=kRequestPosted → 轮询 kDone
- * 算法侧：algo_online_service.cpp RunOnlineService 循环处理
- * 详见 docs/框架流程通路.md §6.3
+ * 算法侧：algo_online_service.cpp RunOnlineServiceForChannel
  */
 #include "visual/algo_shm_codec.h"
 #include "visual/simulation_profile.h"
@@ -38,7 +37,8 @@ LogResult FromShm(const shm::ShmLogResult& s) {
 
 }  // namespace
 
-ShmAlgoService::ShmAlgoService(std::string shm_name) : shm_name_(std::move(shm_name)) {}
+ShmAlgoService::ShmAlgoService(std::string shm_name, std::string mutex_name)
+    : shm_name_(std::move(shm_name)), mutex_name_(std::move(mutex_name)) {}
 
 ShmAlgoService::~ShmAlgoService() {
   Stop();
@@ -67,7 +67,8 @@ bool ShmAlgoService::EnsureMapping() {
     header_->version = shm::kVersion;
     header_->state = shm::State::kIdle;
   }
-  mutex_ = CreateMutexA(nullptr, FALSE, shm::kMutexName);
+  // 每通道独立命名互斥量，避免双工位互相阻塞
+  mutex_ = CreateMutexA(nullptr, FALSE, mutex_name_.c_str());
   return mutex_ != nullptr;
 #else
   return false;
@@ -124,7 +125,6 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
     return false;
   }
 
-  // 通知算法进程：kIdle → kRequestPosted
   header_->state = shm::State::kRequestPosted;
   ReleaseMutex(mtx);
 
@@ -155,8 +155,19 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
     }
     ReleaseMutex(mtx);
   }
+
+  // 超时：强制复位状态机，避免后续周期永久卡住
   resp->ok = false;
   resp->message = "algo timeout";
+  if (WaitForSingleObject(mtx, 2000) == WAIT_OBJECT_0) {
+    const auto st = header_->state;
+    if (st == shm::State::kRequestPosted || st == shm::State::kBusy || st == shm::State::kDone ||
+        st == shm::State::kError) {
+      header_->state = shm::State::kIdle;
+      std::strncpy(header_->error_message, "timeout reset", sizeof(header_->error_message) - 1);
+    }
+    ReleaseMutex(mtx);
+  }
   return false;
 #else
   (void)req;
@@ -165,6 +176,60 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
   resp->message = "SHM unsupported on this platform";
   return false;
 #endif
+}
+
+void ShmAlgoServicePool::Configure(shm::ShmChannelId channel, std::string shm_name,
+                                   std::string mutex_name) {
+  auto svc = std::make_shared<ShmAlgoService>(std::move(shm_name), std::move(mutex_name));
+  if (channel == shm::ShmChannelId::kR09) {
+    r09_ = std::move(svc);
+  } else {
+    r05_ = std::move(svc);
+  }
+}
+
+bool ShmAlgoServicePool::Start() {
+  bool ok = true;
+  if (r05_) {
+    ok = r05_->Start() && ok;
+  }
+  if (r09_) {
+    ok = r09_->Start() && ok;
+  }
+  return ok;
+}
+
+void ShmAlgoServicePool::Stop() {
+  if (r05_) {
+    r05_->Stop();
+  }
+  if (r09_) {
+    r09_->Stop();
+  }
+}
+
+IAlgoService* ShmAlgoServicePool::TryForStation(StationId station) {
+  const shm::ShmChannelId ch = shm::ToShmChannel(station);
+  if (ch == shm::ShmChannelId::kR09) {
+    return r09_ ? static_cast<IAlgoService*>(r09_.get()) : nullptr;
+  }
+  return r05_ ? static_cast<IAlgoService*>(r05_.get()) : nullptr;
+}
+
+IAlgoService& ShmAlgoServicePool::ForStation(StationId station) {
+  IAlgoService* svc = TryForStation(station);
+  if (svc != nullptr) {
+    return *svc;
+  }
+  // 配置缺失时回退到已有通道，启动阶段应保证双通道均 Configure
+  if (r05_) {
+    return *r05_;
+  }
+  if (r09_) {
+    return *r09_;
+  }
+  static MockAlgoService kFallback;
+  return kFallback;
 }
 
 bool MockAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout_ms) {

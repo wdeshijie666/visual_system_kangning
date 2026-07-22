@@ -21,6 +21,8 @@ struct CameraInfo {
   std::string serial;
   std::string ip;
   bool connected = false;
+  /** true：内存 Stub（仿真或 STUB_ 序列号），不会驱动真实投影/采集。 */
+  bool is_stub = false;
 };
 
 class ICamera3D {

@@ -15,9 +15,11 @@
 
 #include "main_window.h"
 #include "algo_process_manager.h"
+#include "visual/alarm_service.h"
 #include "visual/app_context.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
+#include "visual/file_mes_reporter.h"
 #include "visual/i_mes_reporter.h"
 #include "visual/rvc_camera_adapter.h"
 #include "visual/sequence_engine.h"
@@ -86,6 +88,10 @@ int main(int argc, char* argv[]) {
   QDir::setCurrent(QCoreApplication::applicationDirPath());
   qRegisterMetaType<visual::StationId>("visual::StationId");
   qRegisterMetaType<visual::CycleResultEvent>("visual::CycleResultEvent");
+  qRegisterMetaType<visual::AlarmRecord>("visual::AlarmRecord");
+  // 在主线程先构造，保证后续跨线程 Notify/Raise 能排队回 UI 线程
+  (void)visual::EventBus::Instance();
+  (void)visual::AlarmService::Instance();
 
   if (!EnsureSingleInstance()) {
     return 0;
@@ -100,36 +106,69 @@ int main(int argc, char* argv[]) {
   const bool simulation_mode = visual::IsSimulationMode(settings);
   visual::SetSimulationProfile(simulation_mode, settings.simulation.algo_result);
   visual::EventBus::Instance().NotifyLog(
-      QStringLiteral("runMode=%1").arg(QString::fromUtf8(visual::RunModeToString(settings.run_mode))));
-  visual::EventBus::Instance().NotifyLog(
-      QStringLiteral("dataStub saveDepth=%1 savePointcloud=%2 dataRoot=%3")
-          .arg(settings.stub_save_depth)
-          .arg(settings.stub_save_pointcloud)
-          .arg(QString::fromStdString(visual::ResolveDataRoot(settings.data_path))));
+      QStringLiteral("运行模式=%1  R05=%2  R09=%3")
+          .arg(QString::fromUtf8(visual::RunModeToString(settings.run_mode)))
+          .arg(settings.station_r05.enabled ? QStringLiteral("启用") : QStringLiteral("停用"))
+          .arg(settings.station_r09.enabled ? QStringLiteral("启用") : QStringLiteral("停用")));
+  if (simulation_mode) {
+    visual::EventBus::Instance().NotifyLog(QStringLiteral("当前为仿真模式"));
+  } else {
+    visual::EventBus::Instance().NotifyLog(QStringLiteral("当前为实机模式"));
+  }
 
-  // --- 阶段 0.4：后台常驻 — 历史存根 7 天清理（与单次周期无关）---
+  // 工位相机配置交叉校验
+  for (const auto& id : settings.station_r05.camera_ids) {
+    if (visual::AppContext::Instance().Devices().find(id) ==
+        visual::AppContext::Instance().Devices().end()) {
+      visual::EventBus::Instance().NotifyLog(
+          QStringLiteral("配置警告: R05 相机 %1 未在设备列表中")
+              .arg(QString::fromStdString(id)));
+    }
+  }
+  for (const auto& id : settings.station_r09.camera_ids) {
+    if (visual::AppContext::Instance().Devices().find(id) ==
+        visual::AppContext::Instance().Devices().end()) {
+      visual::EventBus::Instance().NotifyLog(
+          QStringLiteral("配置警告: R09 相机 %1 未在设备列表中")
+              .arg(QString::fromStdString(id)));
+    }
+  }
+
+  visual::EventBus::Instance().NotifyLog(
+      QStringLiteral("存图 深度=%1 点云=%2 保留=%3天")
+          .arg(settings.stub_save_depth ? QStringLiteral("开") : QStringLiteral("关"))
+          .arg(settings.stub_save_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
+          .arg(settings.data_retention_days));
+
+  // --- 阶段 0.4：后台常驻 — 历史存根清理 ---
   visual::DataStubRetentionCleaner data_stub_cleaner;
-  data_stub_cleaner.Start(visual::AppContext::Instance().Settings().data_path);
+  data_stub_cleaner.Start(visual::AppContext::Instance().Settings().data_path,
+                          visual::AppContext::Instance().Settings().data_retention_days);
   QObject::connect(&app, &QApplication::aboutToQuit, [&data_stub_cleaner]() { data_stub_cleaner.Stop(); });
 
   // --- 阶段 0.5：创建 PLC / 算法 / MES 依赖（注入 SequenceEngine）---
   auto plc = std::make_shared<visual::VisionPlcAdapter>();
+  std::shared_ptr<visual::ShmAlgoServicePool> algo_pool;
   std::shared_ptr<visual::IAlgoService> algo;
   if (settings.use_shm_algo) {
-    // 默认：独立算法进程 + SHM v2（setting.json → algo.shmName）
-    algo = std::make_shared<visual::ShmAlgoService>(settings.algo_shm_name);
+    // 双工位：各映射一块 SHM，按 station 选择通道
+    algo_pool = std::make_shared<visual::ShmAlgoServicePool>();
+    algo_pool->Configure(visual::shm::ShmChannelId::kR05, settings.algo_channel_r05.shm_name,
+                         settings.algo_channel_r05.mutex_name);
+    algo_pool->Configure(visual::shm::ShmChannelId::kR09, settings.algo_channel_r09.shm_name,
+                         settings.algo_channel_r09.mutex_name);
+    visual::EventBus::Instance().NotifyLog(QStringLiteral("算法共享内存通道已配置"));
   } else {
-    // 调试：进程内 Mock，不经 SHM
     algo = std::make_shared<visual::MockAlgoService>();
   }
-  auto mes = std::make_shared<visual::NullMesReporter>();
+  auto mes = std::make_shared<visual::FileMesReporter>();
 
   visual::StubCameraOptions stub_options;
   stub_options.image_width = settings.simulation.image_width;
   stub_options.image_height = settings.simulation.image_height;
   stub_options.solid_black = true;
 
-  // --- 阶段 0.6：拉起 mock_algo_service.exe，同步 alg_program/algo_config.json ---
+  // --- 阶段 0.6：拉起 mock_algo_service.exe ---
   std::unique_ptr<AlgoProcessManager> algo_process_manager;
   if (settings.use_shm_algo) {
     algo_process_manager = std::make_unique<AlgoProcessManager>(&app);
@@ -143,21 +182,31 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  // --- 阶段 0.5 续：装配 SequenceEngine（Worker 需 UI「启动」后才运行）---
   auto engine = std::make_shared<visual::SequenceEngine>();
   engine->SetPlcClient(plc);
-  engine->SetAlgoService(algo);
+  if (algo_pool) {
+    engine->SetAlgoPool(algo_pool);
+  } else {
+    engine->SetAlgoService(algo);
+  }
   engine->SetMesReporter(mes);
 
-  // --- 阶段 1：设备初始化 — 相机 Connect 并注册到引擎 ---
   for (const auto& kv : visual::AppContext::Instance().Devices()) {
+    const bool use_stub_serial =
+        kv.second.serial.size() >= 5 &&
+        (kv.second.serial.compare(0, 5, "STUB_") == 0 || kv.second.serial.compare(0, 5, "stub_") == 0);
     auto cam = visual::CreateRvcCamera(kv.second.id, kv.second.serial, simulation_mode, stub_options);
-    cam->Connect();
+    const bool ok = cam->Connect();
     engine->RegisterCamera(kv.second.id, cam);
-    visual::EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.second.id), cam->IsConnected());
+    visual::EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.second.id), ok);
+    visual::EventBus::Instance().NotifyLog(
+        QStringLiteral("相机连接 %1 序列号=%2 %3%4")
+            .arg(QString::fromStdString(kv.second.id))
+            .arg(QString::fromStdString(kv.second.serial))
+            .arg(ok ? QStringLiteral("成功") : QStringLiteral("失败"))
+            .arg(use_stub_serial || simulation_mode ? QStringLiteral("（仿真）") : QString()));
   }
 
-  // 退出顺序：停编排 → 断相机（Close/Destroy/SystemShutdown）→ 停算法进程
   QObject::connect(&app, &QApplication::aboutToQuit, [&engine, &algo_process_manager]() {
     if (engine) {
       engine->Stop();
@@ -168,11 +217,21 @@ int main(int argc, char* argv[]) {
     }
   });
 
-  // --- 阶段 0.7：显示 UI；产线轮询见 MainWindow::OnStartEngine ---
   MainWindow window(engine, simulation_mode);
   window.resize(1280, 800);
   window.InitUi();
   window.show();
+
+  // 二次启动时把已有窗口前置
+  QObject::connect(&server, &QLocalServer::newConnection, &window, [&server, &window]() {
+    QLocalSocket* sock = server.nextPendingConnection();
+    if (sock != nullptr) {
+      sock->deleteLater();
+    }
+    window.show();
+    window.raise();
+    window.activateWindow();
+  });
 
   return app.exec();
 }

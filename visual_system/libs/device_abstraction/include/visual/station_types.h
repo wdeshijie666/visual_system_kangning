@@ -154,6 +154,9 @@ struct CaptureBundle {
 
   bool ok = false;
 
+  /** Capture 失败时的简短原因（供日志）。 */
+  std::string error_message;
+
   std::shared_ptr<DepthImageBuffer> depth;
 
   std::shared_ptr<PointCloudBuffer> pointcloud;

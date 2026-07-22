@@ -23,8 +23,6 @@
 #include <Windows.h>
 #endif
 
-#include <QCoreApplication>
-
 #include "visual/app_context.h"
 #include "visual/event_bus.h"
 
@@ -270,11 +268,13 @@ std::string ResolveDataRoot(const std::string& configured_path) {
   if (path.is_absolute()) {
     return path.lexically_normal().string();
   }
-  const QCoreApplication* app = QCoreApplication::instance();
-  if (app != nullptr) {
-    return (fs::path(app->applicationDirPath().toStdWString()) / path).lexically_normal().string();
+  // 主程序启动已 QDir::setCurrent(exeDir)。周期线程/存盘线程禁止再调 QCoreApplication。
+  std::error_code ec;
+  const fs::path cwd = fs::current_path(ec);
+  if (ec) {
+    return path.lexically_normal().string();
   }
-  return path.lexically_normal().string();
+  return (cwd / path).lexically_normal().string();
 }
 
 CaptureRecordContext BuildCaptureRecordContext(StationId station, const std::string& configured_data_path) {
@@ -337,6 +337,16 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
   } else {
     session_dir = fs::path(bundle.pointcloud_path).parent_path().string();
   }
+
+  {
+    std::error_code space_ec;
+    const auto info = fs::space(session_dir.empty() ? "." : session_dir, space_ec);
+    if (!space_ec && info.available < 50ull * 1024ull * 1024ull) {
+      EventBus::Instance().NotifyLog(QStringLiteral("disk low, skip stub save"));
+      return false;
+    }
+  }
+
   std::error_code ec;
   fs::create_directories(fs::path(session_dir), ec);
 

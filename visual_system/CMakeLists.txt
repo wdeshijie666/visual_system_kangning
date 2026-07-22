@@ -20,7 +20,7 @@ endif()
 
 set(RVC_ROOT "D:/Program Files/RVBUST/RVC/RVCSDK" CACHE PATH "RVC SDK root (include/lib/runtime)")
 set(RVC_LIB_DIR "${RVC_ROOT}/lib" CACHE PATH "RVC.lib directory")
-set(RVC_RUNTIME_DIR "${RVC_ROOT}/runtime" CACHE PATH "RVC runtime DLL directory")
+set(RVC_RUNTIME_DIR "${RVC_ROOT}/runtime" CACHE PATH "Directory containing RVC.dll")
 set(Qt5_DIR "D:/Qt/Qt5.14.2/5.14.2/msvc2017_64/lib/cmake/Qt5" CACHE PATH "")
 
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets Gui Network)

@@ -1,10 +1,18 @@
 add_library(vs_app_core
   include/visual/event_bus.h
   include/visual/data_recorder.h
+  include/visual/alarm_service.h
+  include/visual/cycle_job_queue.h
+  include/visual/fault_breaker.h
+  include/visual/rotating_file_log.h
+  include/visual/file_mes_reporter.h
   src/app_context.cpp
   src/data_recorder.cpp
   src/event_bus.cpp
   src/sequence_engine.cpp
+  src/alarm_service.cpp
+  src/rotating_file_log.cpp
+  src/file_mes_reporter.cpp
 )
 add_library(VisualSystem::app_core ALIAS vs_app_core)
 

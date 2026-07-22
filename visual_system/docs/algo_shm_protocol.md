@@ -4,14 +4,20 @@
 
 MVP 实现为 **Win32 命名 FileMapping + Mutex**；算法侧参考 `tools/mock_algo_service/main.cpp`。
 
-## 命名对象
+## 命名对象（双工位 v3）
 
-| 对象 | 默认值 | 说明 |
-|------|--------|------|
-| SHM 映射名 | `Local\\VisualSystemAlgo_v1` | 与 `setting.json` → `algo.shmName` 一致 |
-| Mutex | `Local\\VisualSystemAlgoMutex_v1` | 固定，与 SHM 版本绑定 |
+| 通道 | SHM 映射名 | Mutex | 说明 |
+|------|-----------|-------|------|
+| R05（含 R07） | `Local\\VisualSystemAlgo_R05_v3` | `Local\\VisualSystemAlgoMutex_R05_v3` | 默认值，可由 `setting.json` → `algo.channels.r05` 覆盖 |
+| R09 | `Local\\VisualSystemAlgo_R09_v3` | `Local\\VisualSystemAlgoMutex_R09_v3` | 同上 `algo.channels.r09` |
 
-## 布局（当前 version = 1）
+遗留单通道 `Local\\VisualSystemAlgo_v2` 仅作兼容字段，运行时不再使用。
+
+Header 布局 version 仍为 **2**（字段未变）；通道命名独立为 v3。
+
+## 布局（version = 2）
+
+每工位各一块完整映射，布局相同：
 
 ```c++
 #pragma pack(push, 1)
@@ -24,20 +30,23 @@ struct ShmLogResult {
 
 struct ShmHeader {
   uint32_t magic;        // 0x56414C47 ('VALG')
-  uint32_t version;      // 1
+  uint32_t version;      // 2
   uint32_t seq_id;
   State    state;
-  int32_t  station_id;   // 5=R05, 9=R09
+  int32_t  station_id;   // 5=R05, 7=R07, 9=R09
   int32_t  camera_count;
+  uint32_t input_mode;
+  uint32_t transfer_flags;
   char     session_dir[512];
   char     error_message[256];
   ShmLogResult logs[5];
+  // + cameras[] 元数据，后接 blob arena
 };
 
 #pragma pack(pop)
 ```
 
-总大小：`sizeof(ShmHeader)`（当前约 1KB 级，无像素 blob；图像路径见 `session_dir`）。
+总大小：`kShmTotalSize = sizeof(ShmHeader) + kBlobArenaSize`（每通道各一份）。
 
 ## 状态机
 

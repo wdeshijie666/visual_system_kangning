@@ -16,18 +16,31 @@
 namespace visual {
 
 struct StationConfig {
+  /** 工位总开关：false 时不接 PLC 触发、不参与启动联锁、算法通道关闭。手动触发仍可用。 */
+  bool enabled = true;
   std::vector<std::string> camera_ids;
   std::vector<std::string> robots;
+};
+
+/** 单个算法 SHM 通道的映射名与互斥量名。 */
+struct AlgoChannelSettings {
+  std::string shm_name;
+  std::string mutex_name;
 };
 
 struct AppSettings {
   std::string app_name = "Visual System";
   std::string logo_path = "./resources/logo.png";
   std::string data_path = "./data";
+  /** 存根保留天数（DataStubRetentionCleaner）。 */
+  int data_retention_days = 7;
   PlcConnectionOptions plc;
   StationConfig station_r05;
   StationConfig station_r09;
+  /** 遗留单通道名；双工位模式下仅作兼容字段，实际用 algo_channel_r05/r09。 */
   std::string algo_shm_name = "Local\\VisualSystemAlgo_v2";
+  AlgoChannelSettings algo_channel_r05;
+  AlgoChannelSettings algo_channel_r09;
   int algo_timeout_ms = 30000;
   bool use_shm_algo = true;
   bool algo_transfer_depth = true;
@@ -58,6 +71,14 @@ inline std::uint32_t BuildAlgoTransferFlags(const AppSettings& settings) {
 
 inline bool IsSimulationMode(const AppSettings& settings) {
   return settings.run_mode == RunMode::kSimulation;
+}
+
+inline const StationConfig& StationSettings(const AppSettings& settings, StationId station) {
+  return (station == StationId::kR09) ? settings.station_r09 : settings.station_r05;
+}
+
+inline bool IsStationEnabled(const AppSettings& settings, StationId station) {
+  return StationSettings(settings, station).enabled;
 }
 
 struct DeviceEntry {

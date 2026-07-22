@@ -35,6 +35,11 @@ class EventBus : public QObject {
   void NotifyCycleCompleted(const CycleResultEvent& event);
   void NotifyLog(const QString& line);
   void NotifyAlgoProcessStatus(bool running, const QString& detail);
+  /** 请求重启算法进程（如 SHM 超时挂死）。 */
+  void NotifyRequestAlgoRestart(const QString& reason);
+
+  /** 独立算法进程是否处于可服务状态（无进程 Mock 时恒为 true）。 */
+  static bool IsAlgoProcessReady();
 
  signals:
   void PlcStatusChanged(bool connected, bool heartbeat);
@@ -43,6 +48,7 @@ class EventBus : public QObject {
   void CycleCompleted(const visual::CycleResultEvent& event);
   void LogLine(const QString& line);
   void AlgoProcessStatusChanged(bool running, const QString& detail);
+  void RequestAlgoRestart(const QString& reason);
 
  private:
   EventBus() = default;
