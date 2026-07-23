@@ -5,6 +5,7 @@ set(_vs_app_sources
   src/main.cpp
   src/main_window.cpp
   src/algo_process_manager.cpp
+  src/startup_splash.cpp
   src/station_result_widget.cpp
   src/device_status_widget.cpp
   src/camera_manager_widget.cpp
@@ -15,6 +16,7 @@ set(_vs_app_sources
 set(_vs_app_headers
   include/main_window.h
   include/algo_process_manager.h
+  include/startup_splash.h
   include/station_result_widget.h
   include/device_status_widget.h
   include/camera_manager_widget.h

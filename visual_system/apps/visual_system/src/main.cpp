@@ -3,21 +3,23 @@
  * @brief Visual System 主程序入口。
  *
  * 启动阶段通路（详见 docs/框架流程通路.md §三）：
- *   单实例 → 加载配置 → SHM/算法进程（等通道就绪）→ 装配相机/UI
+ *   单实例 → 启动等待界面 → 加载配置 → SHM/算法进程（等通道就绪）→ 装配相机/UI
  * UI 初始化成功后由 MainWindow 自动执行「启动」（与工具栏按钮相同）。
  */
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QLocalServer>
 #include <QLocalSocket>
-#include <QSharedMemory>
-#include <QSystemSemaphore>
+#include <QLockFile>
+#include <QMessageBox>
 #include <QThread>
 
 #include "main_window.h"
 #include "algo_process_manager.h"
+#include "startup_splash.h"
 #include "visual/alarm_service.h"
 #include "visual/app_context.h"
 #include "visual/data_recorder.h"
@@ -62,24 +64,47 @@ LONG WINAPI VsUnhandledExceptionFilter(EXCEPTION_POINTERS* pExceptionPointers) {
 }
 #endif
 
-static bool EnsureSingleInstance() {
-  const QString key = "VisualSystem_SharedMemory";
-  QSystemSemaphore sem(key + "_sem", 1);
-  sem.acquire();
-  QSharedMemory mem(key);
-  if (mem.attach() || !mem.create(1)) {
-    sem.release();
+namespace {
+
+/** 进程存活期间持有，防止多开；崩溃后由 QLockFile 按 stale 时间回收。 */
+QLockFile* g_instance_lock = nullptr;
+
+void ApplyDarkTheme() {
+  QFile f(QStringLiteral(":/dark.qss"));
+  if (f.open(QIODevice::ReadOnly)) {
+    qApp->setStyleSheet(QString::fromUtf8(f.readAll()));
+  }
+}
+
+bool EnsureSingleInstance() {
+  const QString lock_path =
+      QDir::temp().absoluteFilePath(QStringLiteral("VisualSystem_TanlyMind.lock"));
+  g_instance_lock = new QLockFile(lock_path);
+  // 异常退出后约 30s 可视为陈旧锁并允许重启；正常退出会 unlock。
+  g_instance_lock->setStaleLockTime(30000);
+  if (!g_instance_lock->tryLock(150)) {
     QLocalSocket sock;
-    sock.connectToServer("VisualSystemApp");
+    sock.connectToServer(QStringLiteral("VisualSystemApp"));
     if (sock.waitForConnected(500)) {
       sock.write("ACTIVATE");
       sock.waitForBytesWritten(500);
     }
+    QMessageBox::warning(nullptr, QStringLiteral("SmartGuide"),
+                         QStringLiteral("程序已在运行，不能重复打开。\n已尝试将已有窗口置于前台。"));
+    delete g_instance_lock;
+    g_instance_lock = nullptr;
     return false;
   }
-  sem.release();
   return true;
 }
+
+void SplashStatus(StartupSplash* splash, const QString& text) {
+  if (splash != nullptr) {
+    splash->SetStatus(text);
+  }
+}
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
@@ -90,6 +115,8 @@ int main(int argc, char* argv[]) {
   app.setStyle(QStringLiteral("Fusion"));
   // 配置/数据路径均相对程序目录，避免从 IDE 启动时 CWD 不同读到错误 setting.json
   QDir::setCurrent(QCoreApplication::applicationDirPath());
+  ApplyDarkTheme();
+
   qRegisterMetaType<visual::StationId>("visual::StationId");
   qRegisterMetaType<visual::CycleResultEvent>("visual::CycleResultEvent");
   qRegisterMetaType<visual::AlarmRecord>("visual::AlarmRecord");
@@ -100,8 +127,18 @@ int main(int argc, char* argv[]) {
   if (!EnsureSingleInstance()) {
     return 0;
   }
+
+  QLocalServer::removeServer(QStringLiteral("VisualSystemApp"));
   QLocalServer server;
-  server.listen("VisualSystemApp");
+  if (!server.listen(QStringLiteral("VisualSystemApp"))) {
+    visual::EventBus::Instance().NotifyLog(
+        visual::LogSeverity::kWarning,
+        QStringLiteral("单实例激活通道监听失败: %1").arg(server.errorString()));
+  }
+
+  StartupSplash splash;
+  splash.show();
+  SplashStatus(&splash, QStringLiteral("正在加载配置"));
 
   // --- 阶段 0.2：加载 setting.json / devices.json ---
   visual::AppContext::Instance().Load();
@@ -124,17 +161,17 @@ int main(int argc, char* argv[]) {
   for (const auto& id : settings.station_r05.camera_ids) {
     if (visual::AppContext::Instance().Devices().find(id) ==
         visual::AppContext::Instance().Devices().end()) {
-      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, 
-          QStringLiteral("配置警告: R05 相机 %1 未在设备列表中")
-              .arg(QString::fromStdString(id)));
+      visual::EventBus::Instance().NotifyLog(
+          visual::LogSeverity::kWarning,
+          QStringLiteral("配置警告: R05 相机 %1 未在设备列表中").arg(QString::fromStdString(id)));
     }
   }
   for (const auto& id : settings.station_r09.camera_ids) {
     if (visual::AppContext::Instance().Devices().find(id) ==
         visual::AppContext::Instance().Devices().end()) {
-      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, 
-          QStringLiteral("配置警告: R09 相机 %1 未在设备列表中")
-              .arg(QString::fromStdString(id)));
+      visual::EventBus::Instance().NotifyLog(
+          visual::LogSeverity::kWarning,
+          QStringLiteral("配置警告: R09 相机 %1 未在设备列表中").arg(QString::fromStdString(id)));
     }
   }
 
@@ -143,6 +180,8 @@ int main(int argc, char* argv[]) {
           .arg(settings.stub_save_depth ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.stub_save_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.data_retention_days));
+
+  SplashStatus(&splash, QStringLiteral("正在准备数据清理与设备服务"));
 
   // --- 阶段 0.4：后台常驻 — 历史存根清理 ---
   visual::DataStubRetentionCleaner data_stub_cleaner;
@@ -185,6 +224,7 @@ int main(int argc, char* argv[]) {
   // --- 阶段 0.6：先拉起算法进程并等通道就绪，再连相机 ---
   std::unique_ptr<AlgoProcessManager> algo_process_manager;
   if (settings.use_shm_algo) {
+    SplashStatus(&splash, QStringLiteral("正在启动算法进程"));
     algo_process_manager = std::make_unique<AlgoProcessManager>(&app);
     algo_process_manager->Configure(QString::fromStdString(settings.algo_program_dir),
                                     QString::fromStdString(settings.algo_program_exe));
@@ -196,10 +236,11 @@ int main(int argc, char* argv[]) {
                                              QStringLiteral("算法进程管理器启动失败"));
     } else {
       visual::EventBus::Instance().NotifyLog(QStringLiteral("等待算法通道就绪…"));
+      SplashStatus(&splash, QStringLiteral("正在等待算法通道就绪"));
       const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 30000;
       while (!visual::EventBus::IsAlgoProcessReady() &&
              QDateTime::currentMSecsSinceEpoch() < deadline) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        splash.Pump();
         QThread::msleep(40);
       }
       if (visual::EventBus::IsAlgoProcessReady()) {
@@ -211,6 +252,8 @@ int main(int argc, char* argv[]) {
       }
     }
   }
+
+  SplashStatus(&splash, QStringLiteral("正在连接相机"));
 
   auto engine = std::make_shared<visual::SequenceEngine>();
   engine->SetPlcClient(plc);
@@ -226,6 +269,8 @@ int main(int argc, char* argv[]) {
         kv.second.serial.size() >= 5 &&
         (kv.second.serial.compare(0, 5, "STUB_") == 0 || kv.second.serial.compare(0, 5, "stub_") == 0);
     auto cam = visual::CreateRvcCamera(kv.second.id, kv.second.serial, simulation_mode, stub_options);
+    SplashStatus(&splash,
+                 QStringLiteral("正在连接相机 %1").arg(QString::fromStdString(kv.second.id)));
     const bool ok = cam->Connect();
     engine->RegisterCamera(kv.second.id, cam);
     visual::EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.second.id), ok);
@@ -237,10 +282,13 @@ int main(int argc, char* argv[]) {
             .arg(use_stub_serial || simulation_mode ? QStringLiteral("（仿真）") : QString()));
   }
 
+  SplashStatus(&splash, QStringLiteral("正在加载主界面"));
+
   MainWindow window(engine, simulation_mode);
   window.resize(1280, 800);
   window.InitUi();
   window.show();
+  splash.close();
 
   // 退出顺序：先等离线线程结束，再 Stop/断相机，避免与 Capture 并发
   QObject::connect(&app, &QApplication::aboutToQuit, [&engine, &algo_process_manager, &window]() {
@@ -251,6 +299,9 @@ int main(int argc, char* argv[]) {
     }
     if (algo_process_manager) {
       algo_process_manager->Stop();
+    }
+    if (g_instance_lock != nullptr) {
+      g_instance_lock->unlock();
     }
   });
 
@@ -263,6 +314,13 @@ int main(int argc, char* argv[]) {
     window.show();
     window.raise();
     window.activateWindow();
+#ifdef _WIN32
+    // 强制前台（部分 Windows 版本仅 raise 不够）
+    HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    if (hwnd) {
+      SetForegroundWindow(hwnd);
+    }
+#endif
   });
 
   return app.exec();
