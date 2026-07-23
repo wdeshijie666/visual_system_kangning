@@ -29,13 +29,13 @@
   "channels": {
     "r05": {
       "enabled": true,
-      "shmName": "Global\\VisualSystemAlgo_R05_v5",
-      "mutexName": "Global\\VisualSystemAlgoMutex_R05_v5"
+      "shmName": "Local\\VisualSystemAlgo_R05_v5",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v5"
     },
     "r09": {
       "enabled": true,
-      "shmName": "Global\\VisualSystemAlgo_R09_v5",
-      "mutexName": "Global\\VisualSystemAlgoMutex_R09_v5"
+      "shmName": "Local\\VisualSystemAlgo_R09_v5",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v5"
     }
   }
 }

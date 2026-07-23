@@ -3,6 +3,7 @@
  */
 #include "visual/app_context.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -33,6 +34,35 @@ void FillDefaultAlgoChannels(AppSettings* settings) {
   }
   if (settings->algo_channel_r09.mutex_name.empty()) {
     settings->algo_channel_r09.mutex_name = shm::MutexNameForChannel(shm::ShmChannelId::kR09);
+  }
+}
+
+/** Global\ 需管理员权限；启动时强制改写为 Local\，避免客户机必须提权。 */
+bool RewriteGlobalKernelPrefix(std::string* name) {
+  if (name == nullptr || name->size() < 7) {
+    return false;
+  }
+  if (name->compare(0, 7, "Global\\") == 0 || name->compare(0, 7, "Global/") == 0) {
+    *name = "Local\\" + name->substr(7);
+    return true;
+  }
+  return false;
+}
+
+void NormalizeAlgoChannelsAwayFromGlobal(AppSettings* settings) {
+  if (settings == nullptr) {
+    return;
+  }
+  bool changed = false;
+  changed |= RewriteGlobalKernelPrefix(&settings->algo_shm_name);
+  changed |= RewriteGlobalKernelPrefix(&settings->algo_channel_r05.shm_name);
+  changed |= RewriteGlobalKernelPrefix(&settings->algo_channel_r05.mutex_name);
+  changed |= RewriteGlobalKernelPrefix(&settings->algo_channel_r09.shm_name);
+  changed |= RewriteGlobalKernelPrefix(&settings->algo_channel_r09.mutex_name);
+  if (changed) {
+    std::fprintf(stderr,
+                 "[warning] algo SHM/Mutex 已从 Global\\\\ 改写为 Local\\\\（无需管理员）。"
+                 "请确认 VisualSystem 与 mock_algo_service 均以普通用户启动。\n");
   }
 }
 
@@ -84,6 +114,7 @@ bool AppContext::Load() {
     settings_.station_r09.camera_ids = {"rvc_02"};
     settings_.station_r09.robots = {"R09"};
     FillDefaultAlgoChannels(&settings_);
+    NormalizeAlgoChannelsAwayFromGlobal(&settings_);
     return Save();
   }
 
@@ -165,6 +196,7 @@ bool AppContext::Load() {
     }
   }
   FillDefaultAlgoChannels(&settings_);
+  NormalizeAlgoChannelsAwayFromGlobal(&settings_);
   if (j.contains("dataStub")) {
     settings_.stub_save_depth = j["dataStub"].value("saveDepth", settings_.stub_save_depth);
     settings_.stub_save_pointcloud =

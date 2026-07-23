@@ -1,7 +1,7 @@
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/ThirdPartyPaths.cmake)
 
 # ---------------------------------------------------------------------------
-# 真实点云算法：PointCloudProcessor（G:/ReconDLL）
+# 真实点云算法：经 pcp_c_api（VS2022）桥接 PointCloudProcessor（避免 MSVC 14.29↔14.44 ABI 崩溃）
 # ---------------------------------------------------------------------------
 set(VS_POINTCLOUD_ROOT "G:/ReconDLL/point_cloud" CACHE PATH "PointCloudProcessor root (header + Release/Debug)")
 set(VS_RECON_THIRD_PARTY_ROOT "G:/ReconDLL/third_party" CACHE PATH "ReconDLL packaged OpenCV/PCL/VTK root")
@@ -11,7 +11,7 @@ if(EXISTS "${VS_POINTCLOUD_ROOT}/PointCloudProcessor.h"
    AND EXISTS "${VS_POINTCLOUD_ROOT}/Release/PointCloudProcessor.lib"
    AND EXISTS "${VS_RECON_THIRD_PARTY_ROOT}/third_party.cmake")
   set(VS_HAS_POINTCLOUD_ALGO ON)
-  message(STATUS "PointCloud algo enabled: ${VS_POINTCLOUD_ROOT}")
+  message(STATUS "PointCloud algo enabled via pcp_c_api bridge: ${VS_POINTCLOUD_ROOT}")
 else()
   message(WARNING "PointCloud algo NOT found under ${VS_POINTCLOUD_ROOT}; mock_algo_service will use mock logs only")
 endif()
@@ -24,7 +24,7 @@ set(_mock_algo_sources
   algo_offline_replay.cpp
 )
 if(VS_HAS_POINTCLOUD_ALGO)
-  list(APPEND _mock_algo_sources algo_pointcloud_runner.cpp)
+  list(APPEND _mock_algo_sources algo_pointcloud_runner.cpp algo_processor_create.cpp)
 endif()
 
 add_executable(mock_algo_service ${_mock_algo_sources})
@@ -44,60 +44,66 @@ if(MSVC)
   target_compile_options(mock_algo_service PRIVATE /utf-8)
 endif()
 
-# 与 PointCloudProcessor.dll / OpenCV / PCL 一致：动态 CRT，避免跨堆释放崩溃
+# 与 OpenCV / 桥接 DLL 一致：动态 CRT
 if(MSVC)
   set_property(TARGET mock_algo_service PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
 if(VS_HAS_POINTCLOUD_ALGO)
   include("${VS_RECON_THIRD_PARTY_ROOT}/third_party.cmake")
-  link_directories("${THIRD_PARTY_LIB_DIR}")
 
-  function(tp_lib out_var rel dbg)
-    set(_libs ${${out_var}})
-    list(APPEND _libs
-      "$<$<NOT:$<CONFIG:Debug>>:${THIRD_PARTY_LIB_DIR}/${rel}>"
-      "$<$<CONFIG:Debug>:${THIRD_PARTY_LIB_DIR}/${dbg}>"
-    )
-    set(${out_var} "${_libs}" PARENT_SCOPE)
-  endfunction()
+  # ---- 用 VS2022 单独构建 C ABI 桥接 DLL（与 PointCloudProcessor linker 14.44 对齐）----
+  set(_pcp_bridge_src "${CMAKE_CURRENT_SOURCE_DIR}/pcp_c_api")
+  set(_pcp_bridge_bin "${CMAKE_CURRENT_BINARY_DIR}/pcp_c_api_vs2022")
+  # pcp_c_api/CMakeLists 将 Release/Debug 输出到 bin/、lib/（无配置子目录）
+  set(_pcp_bridge_dll "${_pcp_bridge_bin}/bin/pcp_c_api.dll")
+  set(_pcp_bridge_lib "${_pcp_bridge_bin}/lib/pcp_c_api.lib")
 
-  set(OPENCV_LIBS "")
-  foreach(_m core imgproc imgcodecs calib3d highgui features2d flann)
-    tp_lib(OPENCV_LIBS "opencv_${_m}480.lib" "opencv_${_m}480d.lib")
-  endforeach()
+  add_custom_command(
+    OUTPUT "${_pcp_bridge_bin}/.stamp" "${_pcp_bridge_lib}" "${_pcp_bridge_dll}"
+    COMMAND ${CMAKE_COMMAND}
+      -G "Visual Studio 17 2022" -A x64
+      -S "${_pcp_bridge_src}"
+      -B "${_pcp_bridge_bin}"
+      -DVS_POINTCLOUD_ROOT=${VS_POINTCLOUD_ROOT}
+      -DVS_RECON_THIRD_PARTY_ROOT=${VS_RECON_THIRD_PARTY_ROOT}
+      -DVS_NLOHMANN_INCLUDE=${VS_NLOHMANN_INCLUDE}
+    COMMAND ${CMAKE_COMMAND} --build "${_pcp_bridge_bin}" --config Release
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_pcp_bridge_bin}/bin/pcp_c_api.dll" "${_pcp_bridge_dll}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_pcp_bridge_bin}/lib/pcp_c_api.lib" "${_pcp_bridge_lib}"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_pcp_bridge_bin}/.stamp"
+    DEPENDS
+      "${_pcp_bridge_src}/pcp_c_api.cpp"
+      "${_pcp_bridge_src}/pcp_c_api.h"
+      "${_pcp_bridge_src}/CMakeLists.txt"
+      "${CMAKE_CURRENT_SOURCE_DIR}/PointCloudProcessor_api.h"
+    COMMENT "Building pcp_c_api.dll with VS2022 (ABI match PointCloudProcessor)"
+    VERBATIM
+  )
+  add_custom_target(pcp_c_api_build DEPENDS "${_pcp_bridge_bin}/.stamp")
 
-  set(PCL_LIBS "")
-  foreach(_m common io io_ply kdtree octree search sample_consensus
-              filters features segmentation surface visualization)
-    tp_lib(PCL_LIBS "pcl_${_m}.lib" "pcl_${_m}d.lib")
-  endforeach()
+  add_library(pcp_c_api SHARED IMPORTED GLOBAL)
+  set_target_properties(pcp_c_api PROPERTIES
+    IMPORTED_LOCATION "${_pcp_bridge_dll}"
+    IMPORTED_IMPLIB "${_pcp_bridge_lib}"
+  )
+  add_dependencies(pcp_c_api pcp_c_api_build)
+  add_dependencies(mock_algo_service pcp_c_api_build)
 
-  file(GLOB _vtk_all "${THIRD_PARTY_LIB_DIR}/vtk*-9.3.lib")
-  file(GLOB _vtk_dbg "${THIRD_PARTY_LIB_DIR}/vtk*-9.3d.lib")
-  set(_vtk_rel ${_vtk_all})
-  if(_vtk_dbg)
-    list(REMOVE_ITEM _vtk_rel ${_vtk_dbg})
-  endif()
-  set(VTK_LIBS "")
-  foreach(_lib IN LISTS _vtk_rel)
-    list(APPEND VTK_LIBS "$<$<NOT:$<CONFIG:Debug>>:${_lib}>")
-  endforeach()
-  foreach(_lib IN LISTS _vtk_dbg)
-    list(APPEND VTK_LIBS "$<$<CONFIG:Debug>:${_lib}>")
-  endforeach()
-
-  set(POINTCLOUD_LIB_PATH
-    "$<$<NOT:$<CONFIG:Debug>>:${VS_POINTCLOUD_ROOT}/Release/PointCloudProcessor.lib>"
-    "$<$<CONFIG:Debug>:${VS_POINTCLOUD_ROOT}/Debug/PointCloudProcessor.lib>"
+  set(OPENCV_LIBS
+    "$<$<NOT:$<CONFIG:Debug>>:${THIRD_PARTY_LIB_DIR}/opencv_core480.lib>"
+    "$<$<CONFIG:Debug>:${THIRD_PARTY_LIB_DIR}/opencv_core480d.lib>"
+    "$<$<NOT:$<CONFIG:Debug>>:${THIRD_PARTY_LIB_DIR}/opencv_imgproc480.lib>"
+    "$<$<CONFIG:Debug>:${THIRD_PARTY_LIB_DIR}/opencv_imgproc480d.lib>"
+    "$<$<NOT:$<CONFIG:Debug>>:${THIRD_PARTY_LIB_DIR}/opencv_imgcodecs480.lib>"
+    "$<$<CONFIG:Debug>:${THIRD_PARTY_LIB_DIR}/opencv_imgcodecs480d.lib>"
   )
 
   target_include_directories(mock_algo_service PRIVATE
-    "${VS_POINTCLOUD_ROOT}"
     "${THIRD_PARTY_INCLUDE_DIR}"
     "${THIRD_PARTY_INCLUDE_DIR}/opencv4"
-    "${THIRD_PARTY_INCLUDE_DIR}/eigen3"
-    "${THIRD_PARTY_INCLUDE_DIR}/vtk-9.3"
   )
 
   target_compile_definitions(mock_algo_service PRIVATE
@@ -106,33 +112,44 @@ if(VS_HAS_POINTCLOUD_ALGO)
     WIN32_LEAN_AND_MEAN
     _USE_MATH_DEFINES
     _CRT_SECURE_NO_WARNINGS
-    BOOST_ALL_NO_LIB=0
   )
 
   target_link_libraries(mock_algo_service PRIVATE
-    ${POINTCLOUD_LIB_PATH}
+    pcp_c_api
     ${OPENCV_LIBS}
-    ${PCL_LIBS}
-    ${VTK_LIBS}
   )
 
-  if(MSVC)
-    target_compile_options(mock_algo_service PRIVATE /bigobj)
-  endif()
-
-  # 运行时：DLL + 算法 config.json 放到 exe 旁（当前产线以 Release 部署）
+  # 运行时：桥接 DLL + PointCloudProcessor + 第三方 + config
   add_custom_command(TARGET mock_algo_service POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_pcp_bridge_dll}"
+      "$<TARGET_FILE_DIR:mock_algo_service>/pcp_c_api.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${VS_POINTCLOUD_ROOT}/Release/PointCloudProcessor.dll"
       "$<TARGET_FILE_DIR:mock_algo_service>/PointCloudProcessor.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_CURRENT_SOURCE_DIR}/point_cloud_config.json"
       "$<TARGET_FILE_DIR:mock_algo_service>/config.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
+      "$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
     COMMAND ${CMAKE_COMMAND}
       -DSRC=${THIRD_PARTY_BIN_DIR}
+      -DSRC_RELEASE=${CMAKE_CURRENT_SOURCE_DIR}/runtime_release_overrides
       -DDST=$<TARGET_FILE_DIR:mock_algo_service>
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_release_dlls.cmake"
-    COMMENT "Deploy PointCloudProcessor + third-party DLLs beside mock_algo_service"
+    COMMENT "Deploy pcp_c_api + PointCloudProcessor + third-party + MSVC DLLs"
+    VERBATIM
+  )
+else()
+  add_custom_command(TARGET mock_algo_service POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
+      "$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
+    COMMAND ${CMAKE_COMMAND}
+      -DDST=$<TARGET_FILE_DIR:mock_algo_service>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/deploy_msvc_runtime.cmake"
+    COMMENT "Deploy MSVC runtime DLLs beside mock_algo_service"
     VERBATIM
   )
 endif()

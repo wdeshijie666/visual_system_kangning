@@ -19,10 +19,6 @@
 #include "visual/algo_shm_codec.h"
 #include "visual/algo_shm_layout.h"
 
-#if defined(VS_HAS_POINTCLOUD_ALGO)
-#include "PointCloudProcessor.h"
-#endif
-
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -83,34 +79,6 @@ std::size_t ResolveBlobArenaSize(const visual::shm::ShmHeader* header, std::size
 }
 #endif
 
-#if defined(VS_HAS_POINTCLOUD_ALGO)
-std::unique_ptr<PointCloudProcessor> TryCreateProcessor(const AlgoConfig& config,
-                                                        const std::filesystem::path& exe_dir) {
-  if (!config.use_point_cloud_algo || config.pipeline_simulation.enabled) {
-    return nullptr;
-  }
-  std::filesystem::path cfg_path(config.point_cloud_config.empty() ? "config.json"
-                                                                   : config.point_cloud_config);
-  if (!cfg_path.is_absolute()) {
-    cfg_path = exe_dir / cfg_path;
-  }
-  if (!std::filesystem::exists(cfg_path)) {
-    AlgoError("算法配置缺失，将使用占位结果: " + cfg_path.string());
-    return nullptr;
-  }
-  try {
-    auto proc = std::make_unique<PointCloudProcessor>(cfg_path.string());
-    AlgoInfo("已加载算法引擎: " + cfg_path.string());
-    return proc;
-  } catch (const std::exception& ex) {
-    AlgoError(std::string("算法引擎加载失败: ") + ex.what());
-  } catch (...) {
-    AlgoError("算法引擎加载失败");
-  }
-  return nullptr;
-}
-#endif
-
 }  // namespace
 
 int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannelId channel,
@@ -168,13 +136,13 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
     return 1;
   }
 
-  // 视觉侧已建好映射时不要整头清零，只回收崩溃残留的 Busy/Posted
+  // 视觉侧已建好映射时不要整头清零。仅回收崩溃残留 Busy；
+  // 勿清 RequestPosted：首包可能在通道线程起来前已投递，清掉会导致视觉侧一直等到超时。
   if (WaitShmMutex(mtx, 5000)) {
     if (header->magic != visual::shm::kMagic || header->version != visual::shm::kVersion) {
       InitHeaderKeepBlob(header, blob_arena_size);
     } else {
-      if (header->state == visual::shm::State::kBusy ||
-          header->state == visual::shm::State::kRequestPosted) {
+      if (header->state == visual::shm::State::kBusy) {
         header->state = visual::shm::State::kIdle;
       }
       if (header->blob_arena_bytes == 0) {
@@ -194,7 +162,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
 
   {
     std::ostringstream oss;
-    oss << "[" << tag << "] 通道已就绪 shm=" << shm_name
+    oss << "[" << tag << "] 通道已就绪 CHANNEL_READY shm=" << shm_name
         << " attached=" << (open_err == 0 ? 1 : 0) << " arena=" << blob_arena_size << "B";
     AlgoInfo(oss.str());
   }
@@ -377,17 +345,11 @@ int RunOnlineService(const AlgoConfig& config) {
               " 点云=" + (config.debug_save_pointcloud ? "开" : "关"));
   }
 
-  char module_path[MAX_PATH]{};
-  GetModuleFileNameA(nullptr, module_path, MAX_PATH);
-  const std::filesystem::path exe_dir = std::filesystem::path(module_path).parent_path();
-
 #if defined(VS_HAS_POINTCLOUD_ALGO)
   std::mutex algo_mu;
-  // 每通道独立引擎，避免 R05/R09 分辨率与拟合状态互相污染
+  // 引擎惰性创建（首次计算时）：避免构造 PointCloudProcessor 阻塞/崩溃导致永远无 CHANNEL_READY
   PointCloudProcessorSlot slot_r05;
   PointCloudProcessorSlot slot_r09;
-  slot_r05.processor = TryCreateProcessor(config, exe_dir);
-  slot_r09.processor = TryCreateProcessor(config, exe_dir);
 
   std::thread t_r05([&config, &slot_r05, &algo_mu]() {
     RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR05, &slot_r05, &algo_mu);

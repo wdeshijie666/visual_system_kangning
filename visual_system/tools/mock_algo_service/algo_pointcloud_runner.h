@@ -5,19 +5,17 @@
 #pragma once
 
 #include <filesystem>
-#include <memory>
 #include <string>
 
 #include "algo_config.h"
+#include "algo_processor_create.h"
 #include "visual/algo_shm_layout.h"
-
-class PointCloudProcessor;
 
 namespace algo {
 
 /** 每通道独立引擎；分辨率变化时重建，避免 DLL 内部按旧尺寸缓存崩溃。 */
 struct PointCloudProcessorSlot {
-  std::unique_ptr<::PointCloudProcessor> processor;
+  PointCloudProcessorPtr processor;
   int last_depth_w = -1;
   int last_depth_h = -1;
 };

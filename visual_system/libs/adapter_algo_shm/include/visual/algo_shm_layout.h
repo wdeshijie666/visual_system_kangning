@@ -3,7 +3,8 @@
  * @brief 视觉主进程与算法进程共享内存布局（Win32 命名映射）。
  *
  * 双工位并行（v5）：R05 / R09 各一块映射 + 独立互斥量 + 投递事件。
- * 使用 Global\ 前缀，避免 Local\ 在不同完整性级别/会话下互不可见。
+ * 默认 Local\：同会话普通用户即可 CreateFileMapping，无需管理员。
+ * （Global\ 需要 SeCreateGlobalPrivilege，客户机常被 UAC 拦住。）
  * 布局：[ShmHeader][blob arena]
  */
 #pragma once
@@ -16,19 +17,22 @@
 namespace visual::shm {
 
 /** 遗留单通道名（仅兼容文档/旧配置；运行时默认走双通道）。 */
-inline constexpr char kShmName[] = "Global\\VisualSystemAlgo_v2";
-inline constexpr char kMutexName[] = "Global\\VisualSystemAlgoMutex_v2";
+inline constexpr char kShmName[] = "Local\\VisualSystemAlgo_v2";
+inline constexpr char kMutexName[] = "Local\\VisualSystemAlgoMutex_v2";
 
 /** 双工位逻辑通道：R07 并入 R05 通道。 */
 enum class ShmChannelId : std::uint8_t { kR05 = 5, kR09 = 9 };
 
-/** v5：Global 命名空间，彻底避开 Local\\ 会话隔离。 */
-inline constexpr char kShmNameR05[] = "Global\\VisualSystemAlgo_R05_v5";
-inline constexpr char kMutexNameR05[] = "Global\\VisualSystemAlgoMutex_R05_v5";
-inline constexpr char kEventNameR05[] = "Global\\VisualSystemAlgoEvent_R05_v5";
-inline constexpr char kShmNameR09[] = "Global\\VisualSystemAlgo_R09_v5";
-inline constexpr char kMutexNameR09[] = "Global\\VisualSystemAlgoMutex_R09_v5";
-inline constexpr char kEventNameR09[] = "Global\\VisualSystemAlgoEvent_R09_v5";
+/**
+ * v5 双通道名（Local 命名空间）。
+ * 主程序与算法须同用户会话、同完整性级别启动；勿一只提权一只普通运行。
+ */
+inline constexpr char kShmNameR05[] = "Local\\VisualSystemAlgo_R05_v5";
+inline constexpr char kMutexNameR05[] = "Local\\VisualSystemAlgoMutex_R05_v5";
+inline constexpr char kEventNameR05[] = "Local\\VisualSystemAlgoEvent_R05_v5";
+inline constexpr char kShmNameR09[] = "Local\\VisualSystemAlgo_R09_v5";
+inline constexpr char kMutexNameR09[] = "Local\\VisualSystemAlgoMutex_R09_v5";
+inline constexpr char kEventNameR09[] = "Local\\VisualSystemAlgoEvent_R09_v5";
 
 inline const char* ShmNameForChannel(ShmChannelId channel) {
   return channel == ShmChannelId::kR09 ? kShmNameR09 : kShmNameR05;

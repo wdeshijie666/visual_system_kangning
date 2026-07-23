@@ -111,17 +111,18 @@ void EventBus::NotifyLog(LogSeverity level, const QString& line) {
   emit LogLine(formatted);
 }
 
-void EventBus::NotifyAlgoProcessStatus(bool running, const QString& detail) {
+void EventBus::NotifyAlgoProcessStatus(bool running, const QString& detail, bool service_ready) {
   if (QThread::currentThread() != thread()) {
     const bool r = running;
     const QString d = detail;
+    const bool sr = service_ready;
     QMetaObject::invokeMethod(
-        this, [this, r, d]() { NotifyAlgoProcessStatus(r, d); }, Qt::QueuedConnection);
+        this, [this, r, d, sr]() { NotifyAlgoProcessStatus(r, d, sr); }, Qt::QueuedConnection);
     return;
   }
-  AlgoReadyFlag().store(running);
+  AlgoReadyFlag().store(running && service_ready);
   SetAlgoProcessAlive(running);
-  emit AlgoProcessStatusChanged(running, detail);
+  emit AlgoProcessStatusChanged(running && service_ready, detail);
 }
 
 void EventBus::NotifyRequestAlgoRestart(const QString& reason) {

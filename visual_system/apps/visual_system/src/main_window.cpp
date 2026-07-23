@@ -336,7 +336,7 @@ void MainWindow::InitUi() {
           });
 
   statusBar()->showMessage(tr("就绪"));
-  // 初始化完成后自动执行启动（与点击「启动」相同）
+  // 初始化完成后自动启动；会等到算法通道就绪后再点「启动」
   QTimer::singleShot(500, this, &MainWindow::TryAutoStartEngine);
 }
 
@@ -400,17 +400,25 @@ void MainWindow::TryAutoStartEngine() {
     QTimer::singleShot(400, this, &MainWindow::TryAutoStartEngine);
     return;
   }
-  // 实机：算法进程可能尚未就绪，短暂重试
-  if (!simulation_mode_ && visual::AppContext::Instance().Settings().use_shm_algo &&
+  // 等算法进程真正可接单（通道已就绪）。仅进程拉起不够：首包会超时。
+  if (visual::AppContext::Instance().Settings().use_shm_algo &&
       !visual::EventBus::IsAlgoProcessReady()) {
-    if (auto_start_retries_ < 25) {
+    if (auto_start_retries_ < 75) {  // ~30s
       ++auto_start_retries_;
       QTimer::singleShot(400, this, &MainWindow::TryAutoStartEngine);
       return;
     }
+    visual::EventBus::Instance().NotifyLog(
+        visual::LogSeverity::kWarning,
+        QStringLiteral("自动启动：等待算法就绪超时，仍尝试启动产线"));
   }
   auto_start_done_ = true;
-  OnStartEngine();
+  // 通道刚就绪后再略等一拍，避免与算法线程首轮初始化交错
+  QTimer::singleShot(300, this, [this]() {
+    if (engine_ && !engine_->IsRunning()) {
+      OnStartEngine();
+    }
+  });
 }
 
 void MainWindow::showEvent(QShowEvent* event) {

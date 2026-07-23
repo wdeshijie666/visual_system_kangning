@@ -28,7 +28,15 @@ StationResultWidget::StationResultWidget(const QString& title, QWidget* parent) 
 void StationResultWidget::UpdateResults(const visual::LogResultBatch& logs) {
   for (int i = 0; i < static_cast<int>(logs.size()); ++i) {
     const auto& log = logs[static_cast<std::size_t>(i)];
-    auto* status_item = new QTableWidgetItem(QString::number(static_cast<int>(log.status)));
+    QString status_text;
+    if (log.status == visual::InspectStatus::kOk) {
+      status_text = QStringLiteral("OK");
+    } else if (log.status == visual::InspectStatus::kNg) {
+      status_text = QStringLiteral("NG");
+    } else {
+      status_text = QString::number(static_cast<int>(log.status));
+    }
+    auto* status_item = new QTableWidgetItem(status_text);
     if (log.status == visual::InspectStatus::kNg) {
       status_item->setForeground(QBrush(QColor("#e74c3c")));
     } else if (log.status == visual::InspectStatus::kOk) {

@@ -192,11 +192,17 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
     return false;
   }
 
+  // 新请求入队前：回收孤儿状态（超时未复位 / 重启后残留 Done/Posted 等）。
+  // 仅在投递前执行，不影响「已 Posted 后的等待」；也不削弱算法附着时保留
+  // RequestPosted 的首包保护（那是算法侧启动瞬间的逻辑）。
   if (header_->state != shm::State::kIdle && header_->state != shm::State::kError) {
-    resp->ok = false;
-    resp->message = "shm not idle";
-    ReleaseMutex(mtx);
-    return false;
+    std::ostringstream oss;
+    oss << "[shm] 回收非空闲状态再投递 name=" << shm_name_
+        << " prev=" << static_cast<int>(header_->state)
+        << " seq=" << header_->seq_id;
+    LogToStderr(LogSeverity::kWarning, oss.str());
+    header_->state = shm::State::kIdle;
+    header_->error_message[0] = '\0';
   }
 
   ++seq_;

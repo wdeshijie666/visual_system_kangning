@@ -9,14 +9,12 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <memory>
 #include <sstream>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
 #include "algo_log.h"
-#include "PointCloudProcessor.h"
 #include "visual/algo_shm_codec.h"
 #include "visual/capture_data_format.h"
 
@@ -86,8 +84,8 @@ void FillAllNg(visual::shm::ShmLogResult* logs, std::size_t count) {
   }
 }
 
-void MapFitResultsToLogs(const std::vector<CylinderFitResult>& fits,
-                         visual::shm::ShmLogResult* logs, std::size_t count) {
+void MapFitResultsToLogs(const std::vector<PCP_FitResult>& fits, visual::shm::ShmLogResult* logs,
+                         std::size_t count) {
   FillAllNg(logs, count);
   std::size_t auto_slot = 0;
   for (const auto& f : fits) {
@@ -258,8 +256,8 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
   }
 
   const auto cfg_path = ResolvePointCloudConfig(config, exe_dir);
-  std::unique_ptr<::PointCloudProcessor> owned;
-  ::PointCloudProcessor* proc = nullptr;
+  PointCloudProcessorPtr owned;
+  PCP_Handle* proc = nullptr;
 
   try {
     if (slot != nullptr) {
@@ -279,7 +277,15 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
               << depth.cols << "x" << depth.rows << "，重建算法引擎";
           AlgoInfo(oss.str());
         }
-        slot->processor = std::make_unique<::PointCloudProcessor>(cfg_path.string());
+        std::string create_error;
+        slot->processor = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
+        if (!slot->processor) {
+          if (error) {
+            *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
+          }
+          return false;
+        }
+        AlgoInfo("已加载算法引擎: " + cfg_path.string());
       }
       slot->last_depth_w = depth.cols;
       slot->last_depth_h = depth.rows;
@@ -291,7 +297,14 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
         }
         return false;
       }
-      owned = std::make_unique<::PointCloudProcessor>(cfg_path.string());
+      std::string create_error;
+      owned = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
+      if (!owned) {
+        if (error) {
+          *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
+        }
+        return false;
+      }
       proc = owned.get();
     }
 
@@ -303,28 +316,39 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
       AlgoInfo(oss.str());
     }
 
-    if (!proc->loadDepthMap(depth)) {
+    if (!PCP_LoadDepthMap(proc, depth)) {
       if (error) {
-        *error = "深度转点云失败";
+        *error = "深度转点云失败（或引擎原生异常）";
       }
       return false;
     }
-    const std::size_t point_count = proc->getPointCount();
+    const std::size_t point_count = PCP_GetPointCount(proc);
     AlgoInfo("点云点数=" + std::to_string(point_count));
 
-    // 空点云（如全黑仿真深度）勿调用 process：引擎内部可能按上次分辨率缓存而崩溃。
     if (point_count == 0) {
       AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + " 簇数=0（空点云跳过）");
       return true;
     }
 
     AlgoInfo("process 开始 top_n=" + std::to_string(top_n));
-    const int n = proc->process(depth, top_n);
+    const int n = PCP_Process(proc, depth, top_n);
+    if (n == -999) {
+      AlgoError("PointCloudProcessor::process 发生原生异常（已捕获，进程继续）");
+      if (error) {
+        *error = "算法引擎原生异常，请检查深度数据与 config.json";
+      }
+      if (slot != nullptr) {
+        slot->processor.reset();
+        slot->last_depth_w = 0;
+        slot->last_depth_h = 0;
+      }
+      return false;
+    }
     AlgoInfo("process 结束 返回=" + std::to_string(n));
 
     std::size_t fit_n = 0;
-    if (n > 0 && proc->getPointCount() > 0) {
-      const auto fits = proc->getFitResults();
+    if (n > 0 && PCP_GetPointCount(proc) > 0) {
+      const auto fits = PCP_GetFitResults(proc);
       fit_n = fits.size();
       MapFitResultsToLogs(fits, logs, log_count);
     }
@@ -338,7 +362,7 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
 
     {
       std::ostringstream oss;
-      oss << "计算完成 检出=" << ok_n << "/" << log_count << " 簇数=" << proc->getClusters().size();
+      oss << "计算完成 检出=" << ok_n << "/" << log_count << " 簇数=" << PCP_GetClusterCount(proc);
       AlgoInfo(oss.str());
     }
 

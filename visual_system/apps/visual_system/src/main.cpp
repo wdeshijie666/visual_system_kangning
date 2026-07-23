@@ -3,15 +3,18 @@
  * @brief Visual System 主程序入口。
  *
  * 启动阶段通路（详见 docs/框架流程通路.md §三）：
- *   单实例 → 加载配置 → 后台清理/算法进程 → 装配 PLC/算法/相机 → 显示 UI
+ *   单实例 → 加载配置 → SHM/算法进程（等通道就绪）→ 装配相机/UI
  * UI 初始化成功后由 MainWindow 自动执行「启动」（与工具栏按钮相同）。
  */
 #include <QApplication>
+#include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QSharedMemory>
 #include <QSystemSemaphore>
+#include <QThread>
 
 #include "main_window.h"
 #include "algo_process_manager.h"
@@ -179,7 +182,7 @@ int main(int argc, char* argv[]) {
   stub_options.image_height = settings.simulation.image_height;
   stub_options.solid_black = true;
 
-  // --- 阶段 0.6：拉起 mock_algo_service.exe ---
+  // --- 阶段 0.6：先拉起算法进程并等通道就绪，再连相机 ---
   std::unique_ptr<AlgoProcessManager> algo_process_manager;
   if (settings.use_shm_algo) {
     algo_process_manager = std::make_unique<AlgoProcessManager>(&app);
@@ -189,7 +192,23 @@ int main(int argc, char* argv[]) {
                                          settings.simulation.image_height,
                                          settings.simulation.algo_result);
     if (!algo_process_manager->Start()) {
-      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, QStringLiteral("算法进程管理器启动失败"));
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
+                                             QStringLiteral("算法进程管理器启动失败"));
+    } else {
+      visual::EventBus::Instance().NotifyLog(QStringLiteral("等待算法通道就绪…"));
+      const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 30000;
+      while (!visual::EventBus::IsAlgoProcessReady() &&
+             QDateTime::currentMSecsSinceEpoch() < deadline) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        QThread::msleep(40);
+      }
+      if (visual::EventBus::IsAlgoProcessReady()) {
+        visual::EventBus::Instance().NotifyLog(QStringLiteral("算法通道已就绪，开始连接相机"));
+      } else {
+        visual::EventBus::Instance().NotifyLog(
+            visual::LogSeverity::kWarning,
+            QStringLiteral("等待算法就绪超时，仍继续连接相机"));
+      }
     }
   }
 

@@ -39,11 +39,16 @@ class EventBus : public QObject {
   /** 默认 info 级别，自动加 [info] [时间] 前缀。 */
   void NotifyLog(const QString& line);
   void NotifyLog(LogSeverity level, const QString& line);
-  void NotifyAlgoProcessStatus(bool running, const QString& detail);
+  /**
+   * @param running 进程是否在跑（UI / 存活）
+   * @param detail 状态文案
+   * @param service_ready SHM 通道是否已可接单；默认 true 兼容旧调用
+   */
+  void NotifyAlgoProcessStatus(bool running, const QString& detail, bool service_ready = true);
   /** 请求重启算法进程（如 SHM 超时挂死）。 */
   void NotifyRequestAlgoRestart(const QString& reason);
 
-  /** 独立算法进程是否处于可服务状态（无进程 Mock 时恒为 true）。 */
+  /** 独立算法进程是否处于可服务状态（通道已就绪；无进程 Mock 时恒为 true）。 */
   static bool IsAlgoProcessReady();
 
  signals:
