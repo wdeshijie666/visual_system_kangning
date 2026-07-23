@@ -9,13 +9,16 @@
 #include <QMetaObject>
 #include <QThread>
 
+#include "visual/algo_liveness.h"
+#include "visual/log_format.h"
 #include "visual/rotating_file_log.h"
 
 namespace visual {
 namespace {
 
 RotatingFileLog& AppFileLog() {
-  static RotatingFileLog log("./logs/visual_system.log", 8 * 1024 * 1024);
+  // 当前 + .1.bak … .9.bak，最多 10×8MB
+  static RotatingFileLog log("./logs/visual_system.log", 8 * 1024 * 1024, 9);
   return log;
 }
 
@@ -24,7 +27,6 @@ std::atomic<bool>& AlgoReadyFlag() {
   return ready;
 }
 
-/** 文件日志统一写 UTF-8，避免 Windows 本地代码页导致中文乱码。 */
 void AppendUtf8Log(const QString& line) {
   const QByteArray utf8 = line.toUtf8();
   AppFileLog().Append(std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
@@ -72,6 +74,15 @@ void EventBus::NotifyTrigger(StationId station) {
   emit TriggerReceived(station);
 }
 
+void EventBus::NotifyCycleStarted(StationId station) {
+  if (QThread::currentThread() != thread()) {
+    const StationId s = station;
+    QMetaObject::invokeMethod(this, [this, s]() { NotifyCycleStarted(s); }, Qt::QueuedConnection);
+    return;
+  }
+  emit CycleStarted(station);
+}
+
 void EventBus::NotifyCycleCompleted(const CycleResultEvent& event) {
   if (QThread::currentThread() != thread()) {
     const CycleResultEvent ev = event;
@@ -83,13 +94,21 @@ void EventBus::NotifyCycleCompleted(const CycleResultEvent& event) {
 }
 
 void EventBus::NotifyLog(const QString& line) {
+  NotifyLog(LogSeverity::kInfo, line);
+}
+
+void EventBus::NotifyLog(LogSeverity level, const QString& line) {
   if (QThread::currentThread() != thread()) {
+    const LogSeverity lv = level;
     const QString copy = line;
-    QMetaObject::invokeMethod(this, [this, copy]() { NotifyLog(copy); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(
+        this, [this, lv, copy]() { NotifyLog(lv, copy); }, Qt::QueuedConnection);
     return;
   }
-  AppendUtf8Log(line);
-  emit LogLine(line);
+  const QString formatted =
+      QString::fromStdString(FormatLogLine(level, line.toStdString()));
+  AppendUtf8Log(formatted);
+  emit LogLine(formatted);
 }
 
 void EventBus::NotifyAlgoProcessStatus(bool running, const QString& detail) {
@@ -101,6 +120,7 @@ void EventBus::NotifyAlgoProcessStatus(bool running, const QString& detail) {
     return;
   }
   AlgoReadyFlag().store(running);
+  SetAlgoProcessAlive(running);
   emit AlgoProcessStatusChanged(running, detail);
 }
 
@@ -112,6 +132,7 @@ void EventBus::NotifyRequestAlgoRestart(const QString& reason) {
     return;
   }
   AlgoReadyFlag().store(false);
+  SetAlgoProcessAlive(false);
   emit RequestAlgoRestart(reason);
 }
 

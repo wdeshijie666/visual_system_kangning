@@ -44,6 +44,10 @@ class SequenceEngine {
 
   /** 连接 PLC、映射 SHM、启动轮询线程与双周期工作线程。 */
   bool Start();
+  /**
+   * 停止产线：置 running_=false、唤醒队列、join 全部 worker。
+   * 即使熔断已将 running_ 置 false，仍会 join，避免再次 Start 时 std::terminate。
+   */
   void Stop();
   bool IsRunning() const;
 
@@ -89,7 +93,7 @@ class SequenceEngine {
     CycleOptions options;
   };
 
-  /** 仅做 PLC 边沿检测与设备健康巡检，不执行重活。 */
+  /** 仅做 PLC 边沿检测；设备探活由独立 health 线程负责。 */
   void PollLoop();
   /** R05 通道周期消费者。 */
   void CycleWorkerLoopR05();
@@ -102,12 +106,18 @@ class SequenceEngine {
   std::mutex& CycleMutexFor(StationId station);
   CycleJobQueue<PendingCycle>& CycleQueueFor(StationId station);
 
-  /** 相机/PLC 巡检与轻量重连。 */
+  /** 相机/PLC 巡检：探活确认掉线后再重连；工位周期进行中则跳过该工位。 */
   void CheckDeviceHealth();
+  /** 注册相机后启动；独立于产线 Start/Stop，未开产线也能空闲恢复。 */
+  void StartDeviceHealthMonitor();
+  void StopDeviceHealthMonitor();
+  void DeviceHealthLoop();
 
   void OnCycleOutcome(bool capture_ok, bool algo_ok, bool plc_ok, const std::string& cycle_id,
                       bool update_fault_breaker = true);
   void NotifyQueuesStop();
+  /** join poll/cycle 线程（可在 UI 线程调用；禁止在 cycle worker 内调用）。 */
+  void JoinWorkerThreads();
 
   std::shared_ptr<IPlcClient> plc_;
   std::shared_ptr<IAlgoService> algo_;
@@ -130,7 +140,10 @@ class SequenceEngine {
   FaultBreaker algo_breaker_{3};
   FaultBreaker plc_breaker_{3};
 
-  std::chrono::steady_clock::time_point last_health_check_{};
+  std::atomic<bool> health_monitor_enabled_{false};
+  std::thread health_thread_;
+  /** 串行化巡检，避免与退出 Disconnect 交错。 */
+  std::mutex health_mutex_;
 };
 
 }  // namespace visual

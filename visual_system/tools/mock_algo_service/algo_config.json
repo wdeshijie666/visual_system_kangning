@@ -7,10 +7,12 @@
   "tempForceDepthTiff": "",
   "debugSaveDepth": false,
   "debugSavePointcloud": false,
+  "transferDepth": true,
+  "transferPointcloud": false,
   "pipelineSimulation": {
     "enabled": false,
-    "imageWidth": 2040,
-    "imageHeight": 1080,
+    "imageWidth": 2448,
+    "imageHeight": 2048,
     "algoResult": {
       "status": 1,
       "offsetX": 0.1,
@@ -27,13 +29,13 @@
   "channels": {
     "r05": {
       "enabled": true,
-      "shmName": "Local\\VisualSystemAlgo_R05_v3",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v3"
+      "shmName": "Global\\VisualSystemAlgo_R05_v5",
+      "mutexName": "Global\\VisualSystemAlgoMutex_R05_v5"
     },
     "r09": {
-      "enabled": false,
-      "shmName": "Local\\VisualSystemAlgo_R09_v3",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v3"
+      "enabled": true,
+      "shmName": "Global\\VisualSystemAlgo_R09_v5",
+      "mutexName": "Global\\VisualSystemAlgoMutex_R09_v5"
     }
   }
 }

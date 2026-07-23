@@ -18,12 +18,12 @@ class ShmAlgoService final : public IAlgoService {
                           std::string mutex_name = shm::kMutexNameR05);
   ~ShmAlgoService() override;
 
+  /** 建映射前设置：决定 arena 是否预留深度/点云（与 setting transfer* 一致）。 */
+  void SetTransferFlags(std::uint32_t transfer_flags);
+
   bool Start() override;
   void Stop() override;
   bool Run(const AlgoRequest& req, AlgoResponse* resp, int timeout_ms) override;
-
-  const std::string& ShmName() const { return shm_name_; }
-  const std::string& MutexName() const { return mutex_name_; }
 
  private:
   bool EnsureMapping();
@@ -31,10 +31,16 @@ class ShmAlgoService final : public IAlgoService {
 
   std::string shm_name_;
   std::string mutex_name_;
+  std::string event_name_;
+  std::uint32_t transfer_flags_ = static_cast<std::uint32_t>(AlgoTransferFlag::kDepth);
+  std::size_t mapped_total_size_ = 0;
+  std::size_t blob_arena_size_ = 0;
+  void* mapping_handle_ = nullptr;  // CreateFileMapping 句柄，需保持以免对象被提前销毁
   void* mapping_ = nullptr;
   shm::ShmHeader* header_ = nullptr;
   std::uint8_t* blob_arena_ = nullptr;
   void* mutex_ = nullptr;
+  void* event_ = nullptr;
   std::uint32_t seq_ = 0;
 };
 
@@ -45,6 +51,7 @@ class ShmAlgoService final : public IAlgoService {
 class ShmAlgoServicePool {
  public:
   void Configure(shm::ShmChannelId channel, std::string shm_name, std::string mutex_name);
+  void SetTransferFlags(std::uint32_t transfer_flags);
 
   bool Start();
   void Stop();

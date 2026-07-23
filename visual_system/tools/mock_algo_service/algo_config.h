@@ -17,8 +17,8 @@ struct OfflineReplayOptions {
 
 struct PipelineSimulationOptions {
   bool enabled = false;
-  int image_width = 2040;
-  int image_height = 1080;
+  int image_width = 2448;
+  int image_height = 2048;
   int status = 1;
   double offset_x_mm = 0.1;
   double offset_y_mm = 0.0;
@@ -57,6 +57,9 @@ struct AlgoConfig {
    * 临时：非空时用该 TIFF（毫米）代替 SHM 深度。
    */
   std::string temp_force_depth_tiff;
+  /** 与 setting.json algo.transferDepth / transferPointcloud 对齐，决定 SHM arena 预留。 */
+  bool transfer_depth = true;
+  bool transfer_pointcloud = false;
   /** 日志等级：info=产线日常，debug=详细排查。 */
   LogLevel log_level = LogLevel::kInfo;
 };

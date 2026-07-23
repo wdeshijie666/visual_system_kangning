@@ -21,8 +21,8 @@ struct SimulationResultProfile {
 };
 
 struct SimulationSettings {
-  int image_width = 2040;
-  int image_height = 1080;
+  int image_width = 2448;
+  int image_height = 2048;
   SimulationResultProfile algo_result;
 };
 

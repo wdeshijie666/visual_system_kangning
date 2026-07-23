@@ -106,12 +106,9 @@ bool CopyBlob(std::uint8_t* arena, std::size_t arena_size, std::uint64_t offset,
 
 
 
-/** 每相机固定槽位，避免不同请求间 blob 重叠。 */
-
-std::uint64_t CameraBlobBaseOffset(std::size_t camera_index) {
-
-  return static_cast<std::uint64_t>(camera_index) * kCameraBlobBytes;
-
+/** 每相机槽位起点：步长由 transfer_flags 决定（未开的模态不占槽）。 */
+std::uint64_t CameraBlobBaseOffset(std::size_t camera_index, std::uint32_t transfer_flags) {
+  return static_cast<std::uint64_t>(camera_index) * CameraBlobStrideBytes(transfer_flags);
 }
 
 
@@ -147,16 +144,12 @@ bool WriteRequestToShm(ShmHeader* header, std::uint8_t* blob_arena, std::size_t 
   header->input_mode = static_cast<std::uint32_t>(req.input_mode);
 
   header->transfer_flags = req.transfer_flags;
+  header->blob_arena_bytes = static_cast<std::uint64_t>(blob_arena_size);
 
   std::memset(header->cameras, 0, sizeof(header->cameras));
 
-
-
-  if (blob_arena != nullptr && blob_arena_size > 0) {
-
-    std::memset(blob_arena, 0, blob_arena_size);
-
-  }
+  // 不再整页 memset arena：大图时可达数十～上百 MB，持锁清零会拖死算法取请求。
+  // 深度/点云按实际长度 memcpy 覆盖；未写区域由 blob_size=0 表示无效。
 
 
 
@@ -198,7 +191,7 @@ bool WriteRequestToShm(ShmHeader* header, std::uint8_t* blob_arena, std::size_t 
 
 
 
-    const std::uint64_t base = CameraBlobBaseOffset(static_cast<std::size_t>(i));
+    const std::uint64_t base = CameraBlobBaseOffset(static_cast<std::size_t>(i), req.transfer_flags);
 
     std::uint64_t cursor = base;
 

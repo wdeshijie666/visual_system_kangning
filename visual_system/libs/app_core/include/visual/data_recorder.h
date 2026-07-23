@@ -74,6 +74,9 @@ class CaptureSaveWorker {
 
   void WorkerLoop();
 
+  /** 点云异步落盘队列上限，防止磁盘慢时内存无限增长。 */
+  static constexpr std::size_t kMaxQueueSize = 8;
+
   std::atomic<bool> running_{false};
   std::thread worker_;
   std::mutex mutex_;

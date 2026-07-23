@@ -1,5 +1,5 @@
 {
-  "appName": "Visual System",
+  "appName": "SmartGuide",
   "logoPath": "./resources/logo.png",
   "dataPath": "./data",
   "dataRetentionDays": 7,
@@ -7,6 +7,8 @@
   "plc": {
     "gateway": "192.168.1.10",
     "path": "1,0",
+    "simAutoTrigger": true,
+    "simAutoTriggerIntervalSec": 30,
     "tags": {
       "cameraToPlc": "CameraToPLC_Int",
       "plcToCamera": "PLCToCamera_Int"
@@ -17,8 +19,8 @@
     "r09": { "enabled": true, "cameras": ["rvc_02"], "robots": ["R09"] }
   },
   "simulation": {
-    "imageWidth": 2040,
-    "imageHeight": 1080,
+    "imageWidth": 2448,
+    "imageHeight": 2048,
     "algoResult": {
       "status": 1,
       "offsetX": 0.1,
@@ -44,12 +46,12 @@
     "programExe": "mock_algo_service.exe",
     "channels": {
       "r05": {
-        "shmName": "Local\\VisualSystemAlgo_R05_v3",
-        "mutexName": "Local\\VisualSystemAlgoMutex_R05_v3"
+        "shmName": "Global\\VisualSystemAlgo_R05_v5",
+        "mutexName": "Global\\VisualSystemAlgoMutex_R05_v5"
       },
       "r09": {
-        "shmName": "Local\\VisualSystemAlgo_R09_v3",
-        "mutexName": "Local\\VisualSystemAlgoMutex_R09_v3"
+        "shmName": "Global\\VisualSystemAlgo_R09_v5",
+        "mutexName": "Global\\VisualSystemAlgoMutex_R09_v5"
       }
     }
   }

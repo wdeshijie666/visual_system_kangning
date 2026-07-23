@@ -12,6 +12,8 @@
 #include "visual/alarm_service.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
+#include "visual/log_format.h"
+#include "visual/shm_algo_service.h"
 
 namespace visual {
 namespace {
@@ -59,6 +61,7 @@ SequenceEngine::SequenceEngine() = default;
 
 SequenceEngine::~SequenceEngine() {
   Stop();
+  StopDeviceHealthMonitor();
   DisconnectAllCameras();
 }
 
@@ -102,6 +105,7 @@ void SequenceEngine::NotifyQueuesStop() {
 
 void SequenceEngine::RegisterCamera(const std::string& id, CameraPtr camera) {
   cameras_[id] = std::move(camera);
+  StartDeviceHealthMonitor();
 }
 
 CameraPtr SequenceEngine::GetCamera(const std::string& id) const {
@@ -113,6 +117,7 @@ CameraPtr SequenceEngine::GetCamera(const std::string& id) const {
 }
 
 void SequenceEngine::DisconnectAllCameras() {
+  StopDeviceHealthMonitor();
   for (auto& kv : cameras_) {
     if (kv.second) {
       kv.second->Disconnect();
@@ -157,6 +162,13 @@ void SequenceEngine::ResetFaultBreakers() {
 }
 
 bool SequenceEngine::Start() {
+  // 熔断只清 running_ 不 join：此处先回收残留线程，再拉起新 worker
+  if (poll_thread_.joinable() || cycle_thread_r05_.joinable() || cycle_thread_r09_.joinable()) {
+    running_.store(false);
+    NotifyQueuesStop();
+    JoinWorkerThreads();
+  }
+
   if (running_.exchange(true)) {
     return true;
   }
@@ -171,7 +183,6 @@ bool SequenceEngine::Start() {
     algo_->Start();
   }
   ResetFaultBreakers();
-  last_health_check_ = std::chrono::steady_clock::now();
   cycle_queue_r05_.Clear();
   cycle_queue_r09_.Clear();
   cycle_thread_r05_ = std::thread([this]() { CycleWorkerLoopR05(); });
@@ -180,11 +191,7 @@ bool SequenceEngine::Start() {
   return true;
 }
 
-void SequenceEngine::Stop() {
-  if (!running_.exchange(false)) {
-    return;
-  }
-  NotifyQueuesStop();
+void SequenceEngine::JoinWorkerThreads() {
   if (poll_thread_.joinable()) {
     poll_thread_.join();
   }
@@ -194,6 +201,13 @@ void SequenceEngine::Stop() {
   if (cycle_thread_r09_.joinable()) {
     cycle_thread_r09_.join();
   }
+}
+
+void SequenceEngine::Stop() {
+  // 不论用 exchange 短路：熔断后 running_ 已是 false，仍须 join
+  running_.store(false);
+  NotifyQueuesStop();
+  JoinWorkerThreads();
   cycle_queue_r05_.Clear();
   cycle_queue_r09_.Clear();
   if (plc_) {
@@ -213,7 +227,7 @@ bool SequenceEngine::IsRunning() const {
 
 bool SequenceEngine::RunOfflineCycle(StationId station) {
   if (IsRunning()) {
-    EventBus::Instance().NotifyLog(QStringLiteral("请先停止产线，再执行离线/手动周期"));
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("请先停止产线，再执行离线/手动周期"));
     return false;
   }
   const auto& settings = AppContext::Instance().Settings();
@@ -232,11 +246,11 @@ bool SequenceEngine::RunOfflineCycle(StationId station) {
 
 bool SequenceEngine::RunReplayCycle(StationId station, const std::string& session_dir) {
   if (IsRunning()) {
-    EventBus::Instance().NotifyLog(QStringLiteral("请先停止产线，再执行回放"));
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("请先停止产线，再执行回放"));
     return false;
   }
   if (session_dir.empty() || !SessionDirHasCaptureData(session_dir)) {
-    EventBus::Instance().NotifyLog(QStringLiteral("回放失败：会话目录无效或无采图数据"));
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("回放失败：会话目录无效或无采图数据"));
     return false;
   }
   const auto& settings = AppContext::Instance().Settings();
@@ -249,45 +263,94 @@ bool SequenceEngine::RunReplayCycle(StationId station, const std::string& sessio
   return RunCycle(station, cfg, options);
 }
 
+void SequenceEngine::StartDeviceHealthMonitor() {
+  bool expected = false;
+  if (!health_monitor_enabled_.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  health_thread_ = std::thread([this]() { DeviceHealthLoop(); });
+}
+
+void SequenceEngine::StopDeviceHealthMonitor() {
+  health_monitor_enabled_.store(false);
+  if (health_thread_.joinable()) {
+    health_thread_.join();
+  }
+}
+
+void SequenceEngine::DeviceHealthLoop() {
+  while (health_monitor_enabled_.load()) {
+    CheckDeviceHealth();
+    // 2s 周期，切片 sleep 便于退出时快速 join
+    for (int i = 0; i < 40 && health_monitor_enabled_.load(); ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  }
+}
+
 void SequenceEngine::CheckDeviceHealth() {
+  std::lock_guard<std::mutex> health_lock(health_mutex_);
+  if (!health_monitor_enabled_.load()) {
+    return;
+  }
+
   const auto& settings = AppContext::Instance().Settings();
   const auto& devices = AppContext::Instance().Devices();
-  // 相机：掉线则尝试重连并刷新状态灯（仅已启用工位）
+
   for (auto& kv : cameras_) {
     if (!kv.second) {
       continue;
     }
+    StationId sid = StationId::kR05;
     auto dit = devices.find(kv.first);
     if (dit != devices.end()) {
-      const StationId sid =
-          (dit->second.station == "r09" || dit->second.station == "R09") ? StationId::kR09
-                                                                        : StationId::kR05;
+      sid = (dit->second.station == "r09" || dit->second.station == "R09") ? StationId::kR09
+                                                                          : StationId::kR05;
       if (!IsStationEnabled(settings, sid)) {
         continue;
       }
     }
-    if (!kv.second->IsConnected()) {
-      EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), false);
-      const bool ok = kv.second->Connect();
-      EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), ok);
-      if (!ok) {
-        AlarmService::Instance().Raise(
-            AlarmLevel::kCritical, QStringLiteral("Camera"),
-            QStringLiteral("相机掉线且重连失败: %1").arg(QString::fromStdString(kv.first)));
-      } else {
-        EventBus::Instance().NotifyLog(
-            QStringLiteral("相机已重连: %1").arg(QString::fromStdString(kv.first)));
-      }
+
+    // 该工位正在跑周期（采图/算法/写 PLC）：不探活、不重连，避免抢相机锁拖慢通路
+    std::unique_lock<std::mutex> cycle_lock(CycleMutexFor(sid), std::try_to_lock);
+    if (!cycle_lock.owns_lock()) {
+      continue;
+    }
+
+    const CameraProbeResult probe = kv.second->ProbeAlive();
+    if (probe == CameraProbeResult::kBusy) {
+      continue;
+    }
+    if (probe == CameraProbeResult::kAlive) {
+      EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), true);
+      continue;
+    }
+
+    // 已确认掉线：先断再连（Connect 内部也会清半开句柄）
+    EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), false);
+    EventBus::Instance().NotifyLog(
+        QStringLiteral("相机探活掉线，尝试重连: %1").arg(QString::fromStdString(kv.first)));
+    kv.second->Disconnect();
+    const bool ok = kv.second->Connect();
+    EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), ok);
+    if (!ok) {
+      AlarmService::Instance().Raise(
+          AlarmLevel::kCritical, QStringLiteral("Camera"),
+          QStringLiteral("相机掉线且重连失败: %1").arg(QString::fromStdString(kv.first)));
+    } else {
+      EventBus::Instance().NotifyLog(
+          QStringLiteral("相机已重连: %1").arg(QString::fromStdString(kv.first)));
     }
   }
 
-  // PLC：断开则重连
+  // PLC：断开则重连（产线未 Start 时也可能恢复，不影响相机通路）
   if (plc_ && !plc_->IsConnected()) {
     EventBus::Instance().NotifyPlcStatus(false, false);
     if (!TryConnectPlc()) {
       AlarmService::Instance().Raise(AlarmLevel::kCritical, QStringLiteral("PLC"),
                                      QStringLiteral("PLC 掉线且重连失败"));
-    } else if (plc_) {
+    } else if (plc_ && running_.load()) {
+      plc_->StopHeartbeat();
       plc_->StartHeartbeat(2000);
     }
   }
@@ -304,6 +367,7 @@ void SequenceEngine::OnCycleOutcome(bool capture_ok, bool algo_ok, bool plc_ok,
   } else if (capture_breaker_.OnFailure()) {
     AlarmService::Instance().Raise(AlarmLevel::kCritical, QStringLiteral("Camera"),
                                    QStringLiteral("采图连续失败，触发熔断"), cid);
+    // 仅停接新触发；join 由 UI 线程 Stop()/再次 Start() 完成，避免在本 worker 内 join 自己
     running_.store(false);
     NotifyQueuesStop();
   }
@@ -339,12 +403,6 @@ void SequenceEngine::PollLoop() {
       continue;
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_health_check_ > std::chrono::seconds(2)) {
-      CheckDeviceHealth();
-      last_health_check_ = now;
-    }
-
     if (!plc_) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       continue;
@@ -357,7 +415,7 @@ void SequenceEngine::PollLoop() {
     const bool ok_r07 = plc_->PollTrigger(StationId::kR07, &r07);
     const bool ok_r09 = plc_->PollTrigger(StationId::kR09, &r09);
     if (!ok_r05 || !ok_r07 || !ok_r09) {
-      EventBus::Instance().NotifyLog(QStringLiteral("PLC 触发读取失败"));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("PLC 触发读取失败"));
       EventBus::Instance().NotifyPlcStatus(false, false);
       AlarmService::Instance().Raise(AlarmLevel::kWarning, QStringLiteral("PLC"),
                                      QStringLiteral("PLC 触发轮询失败，尝试重连"));
@@ -387,7 +445,8 @@ void SequenceEngine::PollLoop() {
         AlarmService::Instance().Raise(
             AlarmLevel::kWarning, QStringLiteral("Engine"),
             QStringLiteral("周期队列已满，触发被丢弃 station=%1").arg(static_cast<int>(station)));
-        EventBus::Instance().NotifyLog(QStringLiteral("周期队列已满，本次触发已丢弃"));
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
+            QStringLiteral("周期队列已满，触发已丢弃（请放慢节拍或保持触发直至完成）"));
       } else {
         EventBus::Instance().NotifyTrigger(station);
       }
@@ -433,6 +492,7 @@ void SequenceEngine::CycleWorkerLoopR09() {
 bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options) {
   // 同工位互斥：在线 Worker 与 UI 离线/回放不会同时采同一相机、踩同一 SHM
   std::lock_guard<std::mutex> cycle_lock(CycleMutexFor(station));
+  EventBus::Instance().NotifyCycleStarted(station);
 
   const auto& settings = AppContext::Instance().Settings();
 
@@ -455,34 +515,44 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     for (const auto& cam_id : station_cfg.camera_ids) {
       auto it = cameras_.find(cam_id);
       if (it == cameras_.end() || !it->second) {
-        EventBus::Instance().NotifyLog(
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
             QStringLiteral("相机未配置: %1").arg(QString::fromStdString(cam_id)));
         capture_ok = false;
         continue;
       }
-      // 手动单通路：采图前对本工位相机尝试一次重连，不依赖其他工位状态
+      // 手动单通路：采图前若已探活为掉线，再试一次重连（不占用探活线程时机）
       if (!it->second->IsConnected() && options.single_station_only) {
         EventBus::Instance().NotifyLog(
             QStringLiteral("尝试重连相机: %1").arg(QString::fromStdString(cam_id)));
+        it->second->Disconnect();
         const bool re_ok = it->second->Connect();
         EventBus::Instance().NotifyCameraStatus(QString::fromStdString(cam_id), re_ok);
       }
       if (!it->second->IsConnected()) {
         EventBus::Instance().NotifyCameraStatus(QString::fromStdString(cam_id), false);
         capture_ok = false;
-        EventBus::Instance().NotifyLog(
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
             QStringLiteral("采图跳过，相机离线: %1").arg(QString::fromStdString(cam_id)));
         continue;
       }
 
-      CaptureBundle bundle = it->second->Capture();
+      CaptureCopyOptions copy_opts;
+      const auto cam_info_pre = it->second->GetInfo();
+      // SHM 传输需要则拷；仿真落盘需要堆上深度/点云；实机深度落盘走 SDK 不必拷深度
+      copy_opts.copy_depth =
+          settings.algo_transfer_depth || (settings.stub_save_depth && cam_info_pre.is_stub);
+      copy_opts.copy_pointcloud =
+          settings.algo_transfer_pointcloud || settings.stub_save_pointcloud;
+      copy_opts.copy_gray = true;
+      CaptureBundle bundle = it->second->Capture(copy_opts);
       const std::string file_prefix = MakeCaptureFilePrefix(record_ctx, cam_id);
       if (!bundle.ok) {
         capture_ok = false;
-        EventBus::Instance().NotifyLog(
-            QStringLiteral("采图失败 相机=%1 原因=%2")
-                .arg(QString::fromStdString(cam_id),
-                     QString::fromStdString(bundle.error_message.empty() ? "未知"
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
+            QStringLiteral("采图失败 相机=%1 耗时=%2ms 原因=%3")
+                .arg(QString::fromStdString(cam_id))
+                .arg(bundle.capture_ms)
+                .arg(QString::fromStdString(bundle.error_message.empty() ? "未知"
                                                                          : bundle.error_message)));
         EventBus::Instance().NotifyCameraStatus(QString::fromStdString(cam_id), it->second->IsConnected());
       } else {
@@ -494,7 +564,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
           depth_saved =
               it->second->SaveLastCaptureToDir(record_ctx.output_dir, file_prefix, &bundle);
           if (!depth_saved) {
-            EventBus::Instance().NotifyLog(
+            EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
                 QStringLiteral("深度图保存失败 相机=%1").arg(QString::fromStdString(cam_id)));
           }
         }
@@ -510,8 +580,9 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
 
         const auto cam_info = it->second->GetInfo();
         const QString kind = cam_info.is_stub ? QStringLiteral("仿真") : QStringLiteral("实机");
-        QString line = QStringLiteral("采图成功 相机=%1 类型=%2")
-                           .arg(QString::fromStdString(cam_id), kind);
+        QString line = QStringLiteral("采图成功 相机=%1 类型=%2 耗时=%3ms")
+                           .arg(QString::fromStdString(cam_id), kind)
+                           .arg(bundle.capture_ms);
         if (bundle.depth) {
           line += QStringLiteral(" 深度=%1x%2")
                       .arg(bundle.depth->width)
@@ -519,7 +590,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
         }
         EventBus::Instance().NotifyLog(line);
         if (cam_info.is_stub && !IsSimulationMode(settings)) {
-          EventBus::Instance().NotifyLog(
+          EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
               QStringLiteral("警告: 实机模式下相机 %1 仍为仿真相机")
                   .arg(QString::fromStdString(cam_id)));
         }
@@ -556,7 +627,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     bool plc_ok = true;
     if (options.write_plc && plc_) {
       if (options.single_station_only && !plc_->IsConnected()) {
-        EventBus::Instance().NotifyLog(QStringLiteral("手动周期: PLC 未连接，跳过 NG 写回"));
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("手动周期: PLC 未连接，跳过 NG 写回"));
       } else {
         for (StationId target : CompletedStations(station, options.single_station_only)) {
           if (!plc_->WriteLogResults(target, ng_logs)) {
@@ -580,7 +651,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     ev.plc_ok = plc_ok;
     ev.algo_ok = false;
     EventBus::Instance().NotifyCycleCompleted(ev);
-    EventBus::Instance().NotifyLog(
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
         QStringLiteral("周期中止：采图失败 工位=%1")
             .arg(station == StationId::kR09 ? QStringLiteral("R09") : QStringLiteral("R05")));
     OnCycleOutcome(false, false, plc_ok, cycle_id, options.update_fault_breaker);
@@ -642,7 +713,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
       EventBus::Instance().NotifyLog(
           QStringLiteral("算法完成 合格=%1 不合格=%2").arg(ok_n).arg(ng_n));
     } else {
-      EventBus::Instance().NotifyLog(
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
           QStringLiteral("算法失败: %1")
               .arg(QString::fromStdString(algo_resp.message.empty() ? "未知错误"
                                                                     : algo_resp.message)));
@@ -650,13 +721,13 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
   }
 
   if (!SaveAlgoResultCsv(record_ctx, algo_resp.logs, options.algo_result_suffix)) {
-    EventBus::Instance().NotifyLog(QStringLiteral("算法结果保存失败"));
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("算法结果保存失败"));
   }
 
   bool plc_ok = true;
   if (options.write_plc && plc_) {
     if (options.single_station_only && !plc_->IsConnected()) {
-      EventBus::Instance().NotifyLog(QStringLiteral("手动周期: PLC 未连接，跳过写回"));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("手动周期: PLC 未连接，跳过写回"));
       plc_ok = true;
     } else {
       for (StationId target : CompletedStations(station, options.single_station_only)) {

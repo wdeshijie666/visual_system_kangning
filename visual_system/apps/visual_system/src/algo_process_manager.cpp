@@ -23,13 +23,14 @@
 #include "visual/algo_run_mode.h"
 #include "visual/app_context.h"
 #include "visual/event_bus.h"
+#include "visual/log_format.h"
 #include "visual/rotating_file_log.h"
 #include "visual/run_mode.h"
 
 namespace {
 
 visual::RotatingFileLog& AlgoFileLog() {
-  static visual::RotatingFileLog log("./logs/algo_process.log", 8 * 1024 * 1024);
+  static visual::RotatingFileLog log("./logs/algo_process.log", 8 * 1024 * 1024, 9);
   return log;
 }
 
@@ -190,6 +191,10 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
               visual::AppContext::Instance().Settings().algo_debug_save_depth);
   root.insert(QStringLiteral("debugSavePointcloud"),
               visual::AppContext::Instance().Settings().algo_debug_save_pointcloud);
+  root.insert(QStringLiteral("transferDepth"),
+              visual::AppContext::Instance().Settings().algo_transfer_depth);
+  root.insert(QStringLiteral("transferPointcloud"),
+              visual::AppContext::Instance().Settings().algo_transfer_pointcloud);
   // 保留真实算法开关（若文件已有则不强制改写；缺省写 true）
   if (!root.contains(QStringLiteral("usePointCloudAlgo"))) {
     root.insert(QStringLiteral("usePointCloudAlgo"), true);
@@ -435,10 +440,11 @@ void AlgoProcessManager::OnRestartTimer() {
 }
 
 void AlgoProcessManager::LogEvent(const QString& line) {
+  // EventBus / 文件日志统一由 NotifyLog 加 [info][时间] 前缀，避免双重时间戳
+  visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kInfo, line);
   const QString stamped =
-      QStringLiteral("[%1] %2").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"), line);
+      QString::fromStdString(visual::FormatLogLine(visual::LogSeverity::kInfo, line.toStdString()));
   AppendAlgoProcessFileLog(stamped);
-  visual::EventBus::Instance().NotifyLog(stamped);
 }
 
 void AlgoProcessManager::NotifyStatus(const QString& detail) {

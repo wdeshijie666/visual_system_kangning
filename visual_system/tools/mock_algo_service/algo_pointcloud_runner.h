@@ -5,6 +5,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <string>
 
 #include "algo_config.h"
@@ -14,9 +15,16 @@ class PointCloudProcessor;
 
 namespace algo {
 
+/** 每通道独立引擎；分辨率变化时重建，避免 DLL 内部按旧尺寸缓存崩溃。 */
+struct PointCloudProcessorSlot {
+  std::unique_ptr<::PointCloudProcessor> processor;
+  int last_depth_w = -1;
+  int last_depth_h = -1;
+};
+
 /**
  * 从 SHM 读取第一路有效深度图并跑圆柱拟合。
- * @param processor 非空时复用该实例（每通道线程各持有一个）；空则临时构造。
+ * @param slot 非空时复用/按分辨率重建该通道实例；空则临时构造。
  * @return false 表示输入无效或算法抛错级失败（写入 error）。
  *         无有效圆柱时仍返回 true，logs 填 NG。
  */
@@ -24,6 +32,6 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
                           std::size_t blob_arena_size, const AlgoConfig& config,
                           const std::filesystem::path& exe_dir, visual::shm::ShmLogResult* logs,
                           std::size_t log_count, std::string* error,
-                          ::PointCloudProcessor* processor = nullptr);
+                          PointCloudProcessorSlot* slot = nullptr);
 
 }  // namespace algo

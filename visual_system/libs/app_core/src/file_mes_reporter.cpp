@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include "visual/rotating_file_log.h"
+
 namespace fs = std::filesystem;
 
 namespace visual {
@@ -39,6 +41,7 @@ void FileMesReporter::ReportCycle(const std::string& vin, StationId station, con
     if (path.has_parent_path()) {
       fs::create_directories(path.parent_path());
     }
+    RotatingFileLog::RotateBySize(file_path_, 8ull * 1024 * 1024, 9);
     std::ofstream out(file_path_, std::ios::app);
     if (!out) {
       return;
@@ -65,6 +68,7 @@ void FileMesReporter::ReportFault(const std::string& subsystem, const std::strin
     if (path.has_parent_path()) {
       fs::create_directories(path.parent_path());
     }
+    RotatingFileLog::RotateBySize(file_path_, 8ull * 1024 * 1024, 9);
     std::ofstream out(file_path_, std::ios::app);
     if (!out) {
       return;

@@ -224,7 +224,7 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
                           std::size_t blob_arena_size, const AlgoConfig& config,
                           const std::filesystem::path& exe_dir, visual::shm::ShmLogResult* logs,
                           std::size_t log_count, std::string* error,
-                          ::PointCloudProcessor* processor) {
+                          PointCloudProcessorSlot* slot) {
   if (logs == nullptr || log_count == 0) {
     if (error) {
       *error = "结果缓冲区无效";
@@ -250,27 +250,57 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
     ConvertShmDepthMetersToMm(&depth);
   }
 
-  const auto cfg_path = ResolvePointCloudConfig(config, exe_dir);
-  std::unique_ptr<::PointCloudProcessor> owned;
-  ::PointCloudProcessor* proc = processor;
-  if (proc == nullptr) {
-    if (!std::filesystem::exists(cfg_path)) {
-      if (error) {
-        *error = "算法配置文件缺失: " + cfg_path.string();
-      }
-      return false;
+  if (depth.empty() || depth.cols <= 0 || depth.rows <= 0) {
+    if (error) {
+      *error = "深度图尺寸无效";
     }
-    owned = std::make_unique<::PointCloudProcessor>(cfg_path.string());
-    proc = owned.get();
+    return false;
   }
 
+  const auto cfg_path = ResolvePointCloudConfig(config, exe_dir);
+  std::unique_ptr<::PointCloudProcessor> owned;
+  ::PointCloudProcessor* proc = nullptr;
+
   try {
+    if (slot != nullptr) {
+      const bool size_changed =
+          slot->last_depth_w > 0 &&
+          (slot->last_depth_w != depth.cols || slot->last_depth_h != depth.rows);
+      if (slot->processor == nullptr || size_changed) {
+        if (!std::filesystem::exists(cfg_path)) {
+          if (error) {
+            *error = "算法配置文件缺失: " + cfg_path.string();
+          }
+          return false;
+        }
+        if (size_changed) {
+          std::ostringstream oss;
+          oss << "深度分辨率变化 " << slot->last_depth_w << "x" << slot->last_depth_h << " -> "
+              << depth.cols << "x" << depth.rows << "，重建算法引擎";
+          AlgoInfo(oss.str());
+        }
+        slot->processor = std::make_unique<::PointCloudProcessor>(cfg_path.string());
+      }
+      slot->last_depth_w = depth.cols;
+      slot->last_depth_h = depth.rows;
+      proc = slot->processor.get();
+    } else {
+      if (!std::filesystem::exists(cfg_path)) {
+        if (error) {
+          *error = "算法配置文件缺失: " + cfg_path.string();
+        }
+        return false;
+      }
+      owned = std::make_unique<::PointCloudProcessor>(cfg_path.string());
+      proc = owned.get();
+    }
+
     const int top_n = config.point_cloud_top_n > 0 ? config.point_cloud_top_n : 5;
 
     {
       std::ostringstream oss;
-      oss << "深度图 " << depth.cols << "x" << depth.rows;
-      AlgoDebug(oss.str());
+      oss << "深度图 " << depth.cols << "x" << depth.rows << " type=" << depth.type();
+      AlgoInfo(oss.str());
     }
 
     if (!proc->loadDepthMap(depth)) {
@@ -279,11 +309,25 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
       }
       return false;
     }
-    AlgoDebug("点云点数=" + std::to_string(proc->getPointCount()));
+    const std::size_t point_count = proc->getPointCount();
+    AlgoInfo("点云点数=" + std::to_string(point_count));
 
+    // 空点云（如全黑仿真深度）勿调用 process：引擎内部可能按上次分辨率缓存而崩溃。
+    if (point_count == 0) {
+      AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + " 簇数=0（空点云跳过）");
+      return true;
+    }
+
+    AlgoInfo("process 开始 top_n=" + std::to_string(top_n));
     const int n = proc->process(depth, top_n);
-    const auto fits = proc->getFitResults();
-    MapFitResultsToLogs(fits, logs, log_count);
+    AlgoInfo("process 结束 返回=" + std::to_string(n));
+
+    std::size_t fit_n = 0;
+    if (n > 0 && proc->getPointCount() > 0) {
+      const auto fits = proc->getFitResults();
+      fit_n = fits.size();
+      MapFitResultsToLogs(fits, logs, log_count);
+    }
 
     int ok_n = 0;
     for (std::size_t i = 0; i < log_count; ++i) {
@@ -307,7 +351,7 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
             << " 长度=" << L.length_mm;
         AlgoDebug(oss.str());
       }
-      AlgoDebug("process返回=" + std::to_string(n) + " 拟合条数=" + std::to_string(fits.size()));
+      AlgoDebug("process返回=" + std::to_string(n) + " 拟合条数=" + std::to_string(fit_n));
     }
     return true;
   } catch (const std::exception& ex) {

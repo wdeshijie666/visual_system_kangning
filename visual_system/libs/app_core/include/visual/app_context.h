@@ -1,6 +1,8 @@
 /**
  * @file app_context.h
  * @brief 全局配置：setting.json / devices.json。
+ *
+ * 约定：Load() 之后 Settings()/Devices() 视为只读；产线运行中勿热改配置，以免无锁数据竞争。
  */
 #pragma once
 
@@ -29,7 +31,7 @@ struct AlgoChannelSettings {
 };
 
 struct AppSettings {
-  std::string app_name = "Visual System";
+  std::string app_name = "SmartGuide";
   std::string logo_path = "./resources/logo.png";
   std::string data_path = "./data";
   /** 存根保留天数（DataStubRetentionCleaner）。 */

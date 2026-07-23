@@ -25,6 +25,20 @@ struct CameraInfo {
   bool is_stub = false;
 };
 
+/** 控制 Capture() 是否把深度/点云/灰度拷到堆（由 transfer + 落盘开关决定）。 */
+struct CaptureCopyOptions {
+  bool copy_depth = true;
+  bool copy_pointcloud = true;
+  bool copy_gray = true;
+};
+
+/** 轻量探活结果（不采图、不写参）。 */
+enum class CameraProbeResult {
+  kAlive = 0,
+  kDead = 1,
+  kBusy = 2,
+};
+
 class ICamera3D {
  public:
   virtual ~ICamera3D() = default;
@@ -33,10 +47,16 @@ class ICamera3D {
   virtual void Disconnect() = 0;
   virtual bool IsConnected() const = 0;
 
+  /**
+   * 周期性探活：读 SDK 状态（如 IsOpen / IsPhysicallyConnected），不触发 Capture。
+   * 实现须 try_lock 内部互斥：采图中返回 kBusy，避免抢锁影响产线/手动周期。
+   */
+  virtual CameraProbeResult ProbeAlive() = 0;
+
   virtual CameraInfo GetInfo() const = 0;
 
-  /** 采集到内存（不落盘），供在线 SHM 传输。 */
-  virtual CaptureBundle Capture() = 0;
+  /** 采集到内存（不落盘）。按 opts 决定是否拷贝深度/点云/灰度。 */
+  virtual CaptureBundle Capture(const CaptureCopyOptions& opts = {}) = 0;
 
   /**
    * 将最近一次 Capture() 的结果写入 session_dir。

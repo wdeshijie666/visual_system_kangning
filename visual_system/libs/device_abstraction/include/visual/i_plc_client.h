@@ -17,6 +17,13 @@ struct PlcConnectionOptions {
   int timeout_ms = 5000;
   std::string tag_camera_to_plc = "CameraToPLC_Int";
   std::string tag_plc_to_camera = "PLCToCamera_Int";
+  /**
+   * 仅 MemoryTransport 有效：产线 Start 后按间隔注入 PLC 触发边沿。
+   * 真机 libplctag 忽略。
+   */
+  bool sim_auto_trigger = true;
+  /** 循环触发间隔（秒），默认 30。 */
+  int sim_auto_trigger_interval_sec = 30;
 };
 
 struct PlcTriggerEvent {

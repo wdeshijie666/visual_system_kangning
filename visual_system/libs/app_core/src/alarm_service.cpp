@@ -13,6 +13,8 @@
 #include <QTextStream>
 #include <QThread>
 
+#include "visual/rotating_file_log.h"
+
 namespace visual {
 
 AlarmService& AlarmService::Instance() {
@@ -66,7 +68,9 @@ void AlarmService::AppendHistory(const AlarmRecord& record) {
 
 void AlarmService::Persist(const AlarmRecord& record) {
   QDir().mkpath(QStringLiteral("./logs"));
-  QFile file(QStringLiteral("./logs/alarms.jsonl"));
+  const QString path = QStringLiteral("./logs/alarms.jsonl");
+  RotatingFileLog::RotateBySize(path.toStdString(), 8ull * 1024 * 1024, 9);
+  QFile file(path);
   if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
     return;
   }

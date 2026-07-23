@@ -4,7 +4,7 @@
  *
  * 启动阶段通路（详见 docs/框架流程通路.md §三）：
  *   单实例 → 加载配置 → 后台清理/算法进程 → 装配 PLC/算法/相机 → 显示 UI
- * 产线周期由 MainWindow 工具栏「启动」后 SequenceEngine::Start 开始，不在此自动启动。
+ * UI 初始化成功后由 MainWindow 自动执行「启动」（与工具栏按钮相同）。
  */
 #include <QApplication>
 #include <QDir>
@@ -19,6 +19,7 @@
 #include "visual/app_context.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
+#include "visual/log_format.h"
 #include "visual/file_mes_reporter.h"
 #include "visual/i_mes_reporter.h"
 #include "visual/rvc_camera_adapter.h"
@@ -120,7 +121,7 @@ int main(int argc, char* argv[]) {
   for (const auto& id : settings.station_r05.camera_ids) {
     if (visual::AppContext::Instance().Devices().find(id) ==
         visual::AppContext::Instance().Devices().end()) {
-      visual::EventBus::Instance().NotifyLog(
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, 
           QStringLiteral("配置警告: R05 相机 %1 未在设备列表中")
               .arg(QString::fromStdString(id)));
     }
@@ -128,7 +129,7 @@ int main(int argc, char* argv[]) {
   for (const auto& id : settings.station_r09.camera_ids) {
     if (visual::AppContext::Instance().Devices().find(id) ==
         visual::AppContext::Instance().Devices().end()) {
-      visual::EventBus::Instance().NotifyLog(
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, 
           QStringLiteral("配置警告: R09 相机 %1 未在设备列表中")
               .arg(QString::fromStdString(id)));
     }
@@ -157,7 +158,17 @@ int main(int argc, char* argv[]) {
                          settings.algo_channel_r05.mutex_name);
     algo_pool->Configure(visual::shm::ShmChannelId::kR09, settings.algo_channel_r09.shm_name,
                          settings.algo_channel_r09.mutex_name);
-    visual::EventBus::Instance().NotifyLog(QStringLiteral("算法共享内存通道已配置"));
+    const auto transfer_flags = visual::BuildAlgoTransferFlags(settings);
+    algo_pool->SetTransferFlags(transfer_flags);
+    // 先于算法进程建映射，保证尺寸按 transferDepth/Pointcloud 申请
+    if (!algo_pool->Start()) {
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
+                                             QStringLiteral("算法 SHM 映射失败"));
+    }
+    visual::EventBus::Instance().NotifyLog(
+        QStringLiteral("算法共享内存通道已配置 transferDepth=%1 transferPointcloud=%2")
+            .arg(settings.algo_transfer_depth ? QStringLiteral("开") : QStringLiteral("关"))
+            .arg(settings.algo_transfer_pointcloud ? QStringLiteral("开") : QStringLiteral("关")));
   } else {
     algo = std::make_shared<visual::MockAlgoService>();
   }
@@ -178,7 +189,7 @@ int main(int argc, char* argv[]) {
                                          settings.simulation.image_height,
                                          settings.simulation.algo_result);
     if (!algo_process_manager->Start()) {
-      visual::EventBus::Instance().NotifyLog(QStringLiteral("算法进程管理器启动失败"));
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, QStringLiteral("算法进程管理器启动失败"));
     }
   }
 
@@ -207,7 +218,14 @@ int main(int argc, char* argv[]) {
             .arg(use_stub_serial || simulation_mode ? QStringLiteral("（仿真）") : QString()));
   }
 
-  QObject::connect(&app, &QApplication::aboutToQuit, [&engine, &algo_process_manager]() {
+  MainWindow window(engine, simulation_mode);
+  window.resize(1280, 800);
+  window.InitUi();
+  window.show();
+
+  // 退出顺序：先等离线线程结束，再 Stop/断相机，避免与 Capture 并发
+  QObject::connect(&app, &QApplication::aboutToQuit, [&engine, &algo_process_manager, &window]() {
+    window.PrepareForAppExit();
     if (engine) {
       engine->Stop();
       engine->DisconnectAllCameras();
@@ -216,11 +234,6 @@ int main(int argc, char* argv[]) {
       algo_process_manager->Stop();
     }
   });
-
-  MainWindow window(engine, simulation_mode);
-  window.resize(1280, 800);
-  window.InitUi();
-  window.show();
 
   // 二次启动时把已有窗口前置
   QObject::connect(&server, &QLocalServer::newConnection, &window, [&server, &window]() {

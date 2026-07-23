@@ -11,8 +11,8 @@
 namespace visual {
 
 struct StubCameraOptions {
-  int image_width = 2040;
-  int image_height = 1080;
+  int image_width = 2448;
+  int image_height = 2048;
   bool solid_black = true;
 };
 

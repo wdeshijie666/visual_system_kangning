@@ -9,6 +9,7 @@
 #include <QString>
 
 #include "visual/station_types.h"
+#include "visual/log_format.h"
 
 namespace visual {
 
@@ -32,8 +33,12 @@ class EventBus : public QObject {
   void NotifyPlcStatus(bool connected, bool heartbeat);
   void NotifyCameraStatus(const QString& camera_id, bool connected);
   void NotifyTrigger(StationId station);
+  /** 工位进入 RunCycle（采图/算法/写 PLC）时发出，供状态栏「工作中」。 */
+  void NotifyCycleStarted(StationId station);
   void NotifyCycleCompleted(const CycleResultEvent& event);
+  /** 默认 info 级别，自动加 [info] [时间] 前缀。 */
   void NotifyLog(const QString& line);
+  void NotifyLog(LogSeverity level, const QString& line);
   void NotifyAlgoProcessStatus(bool running, const QString& detail);
   /** 请求重启算法进程（如 SHM 超时挂死）。 */
   void NotifyRequestAlgoRestart(const QString& reason);
@@ -45,6 +50,7 @@ class EventBus : public QObject {
   void PlcStatusChanged(bool connected, bool heartbeat);
   void CameraStatusChanged(const QString& camera_id, bool connected);
   void TriggerReceived(visual::StationId station);
+  void CycleStarted(visual::StationId station);
   void CycleCompleted(const visual::CycleResultEvent& event);
   void LogLine(const QString& line);
   void AlgoProcessStatusChanged(bool running, const QString& detail);

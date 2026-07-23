@@ -110,6 +110,10 @@ bool AppContext::Load() {
   if (j.contains("plc")) {
     settings_.plc.gateway = j["plc"].value("gateway", settings_.plc.gateway);
     settings_.plc.path = j["plc"].value("path", settings_.plc.path);
+    settings_.plc.sim_auto_trigger =
+        j["plc"].value("simAutoTrigger", settings_.plc.sim_auto_trigger);
+    settings_.plc.sim_auto_trigger_interval_sec =
+        j["plc"].value("simAutoTriggerIntervalSec", settings_.plc.sim_auto_trigger_interval_sec);
     if (j["plc"].contains("tags")) {
       settings_.plc.tag_camera_to_plc =
           j["plc"]["tags"].value("cameraToPlc", settings_.plc.tag_camera_to_plc);
@@ -226,6 +230,8 @@ bool AppContext::Save() {
   j["dataRetentionDays"] = settings_.data_retention_days;
   j["plc"]["gateway"] = settings_.plc.gateway;
   j["plc"]["path"] = settings_.plc.path;
+  j["plc"]["simAutoTrigger"] = settings_.plc.sim_auto_trigger;
+  j["plc"]["simAutoTriggerIntervalSec"] = settings_.plc.sim_auto_trigger_interval_sec;
   j["plc"]["tags"]["cameraToPlc"] = settings_.plc.tag_camera_to_plc;
   j["plc"]["tags"]["plcToCamera"] = settings_.plc.tag_plc_to_camera;
   j["stations"]["r05"]["enabled"] = settings_.station_r05.enabled;

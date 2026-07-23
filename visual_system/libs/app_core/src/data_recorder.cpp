@@ -25,6 +25,7 @@
 
 #include "visual/app_context.h"
 #include "visual/event_bus.h"
+#include "visual/log_format.h"
 
 namespace fs = std::filesystem;
 
@@ -342,7 +343,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
     std::error_code space_ec;
     const auto info = fs::space(session_dir.empty() ? "." : session_dir, space_ec);
     if (!space_ec && info.available < 50ull * 1024ull * 1024ull) {
-      EventBus::Instance().NotifyLog(QStringLiteral("disk low, skip stub save"));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("disk low, skip stub save"));
       return false;
     }
   }
@@ -360,6 +361,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
       depth_ok = fs::exists(depth_fs);
       if (!depth_ok) {
         EventBus::Instance().NotifyLog(
+            LogSeverity::kWarning,
             QString("save depth skipped/missing tiff (use camera SaveLastCaptureToDir): %1")
                 .arg(QString::fromStdString(bundle.depth_path)));
       }
@@ -375,6 +377,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
     }
     if (!depth_ok && ext != ".tif" && ext != ".tiff" && ext != ".TIF" && ext != ".TIFF") {
       EventBus::Instance().NotifyLog(
+          LogSeverity::kWarning,
           QString("save depth failed: %1").arg(QString::fromStdString(bundle.depth_path)));
     }
     ok = depth_ok && ok;
@@ -391,6 +394,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
     }
     if (!ply_ok) {
       EventBus::Instance().NotifyLog(
+          LogSeverity::kWarning,
           QString("save ply failed: %1").arg(QString::fromStdString(bundle.pointcloud_path)));
     }
     ok = ply_ok && ok;
@@ -428,9 +432,18 @@ void CaptureSaveWorker::Stop() {
 
 void CaptureSaveWorker::Enqueue(CaptureBundle bundle) {
   Start();
+  bool dropped = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push_back(std::move(bundle));
+    if (queue_.size() >= kMaxQueueSize) {
+      dropped = true;
+    } else {
+      queue_.push_back(std::move(bundle));
+    }
+  }
+  if (dropped) {
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("点云落盘队列已满，丢弃本次异步保存"));
+    return;
   }
   cv_.notify_one();
 }
@@ -454,6 +467,7 @@ void CaptureSaveWorker::WorkerLoop() {
 
     if (!SaveCaptureBundleToDir(job)) {
       EventBus::Instance().NotifyLog(
+          LogSeverity::kWarning,
           QString("async capture save failed: %1").arg(QString::fromStdString(job.camera_serial)));
     }
   }

@@ -1,17 +1,18 @@
 /**
  * @file shm_algo_service.cpp
- * @brief 视觉侧算法通道：每工位独立 SHM + Mutex，与算法进程双线程配对。
- *
- * 在线：WriteRequestToShm 写入 blob → state=kRequestPosted → 轮询 kDone
- * 算法侧：algo_online_service.cpp RunOnlineServiceForChannel
+ * @brief 视觉侧算法通道：每工位独立 SHM + Mutex + Event，与算法进程双线程配对。
  */
 #include "visual/algo_shm_codec.h"
+#include "visual/algo_liveness.h"
+#include "visual/capture_data_format.h"
+#include "visual/log_format.h"
 #include "visual/simulation_profile.h"
 #include "visual/shm_algo_service.h"
 #include "visual/station_types.h"
 
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <thread>
 
 #ifdef _WIN32
@@ -35,13 +36,42 @@ LogResult FromShm(const shm::ShmLogResult& s) {
   return r;
 }
 
+#ifdef _WIN32
+bool WaitShmMutex(HANDLE mtx, DWORD timeout_ms) {
+  const DWORD w = WaitForSingleObject(mtx, timeout_ms);
+  return w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+}
+
+void InitShmHeaderOnly(shm::ShmHeader* header, std::size_t blob_arena_size) {
+  std::memset(header, 0, sizeof(shm::ShmHeader));
+  header->magic = shm::kMagic;
+  header->version = shm::kVersion;
+  header->state = shm::State::kIdle;
+  header->blob_arena_bytes = static_cast<std::uint64_t>(blob_arena_size);
+  header->vision_pid = static_cast<std::uint32_t>(GetCurrentProcessId());
+}
+#endif
+
 }  // namespace
 
 ShmAlgoService::ShmAlgoService(std::string shm_name, std::string mutex_name)
-    : shm_name_(std::move(shm_name)), mutex_name_(std::move(mutex_name)) {}
+    : shm_name_(std::move(shm_name)), mutex_name_(std::move(mutex_name)) {
+  if (shm_name_.empty()) {
+    shm_name_ = shm::kShmNameR05;
+  }
+  if (mutex_name_.empty()) {
+    mutex_name_ = shm::kMutexNameR05;
+  }
+  const bool is_r09 = (shm_name_.find("R09") != std::string::npos);
+  event_name_ = shm::EventNameForChannel(is_r09 ? shm::ShmChannelId::kR09 : shm::ShmChannelId::kR05);
+}
 
 ShmAlgoService::~ShmAlgoService() {
   Stop();
+}
+
+void ShmAlgoService::SetTransferFlags(std::uint32_t transfer_flags) {
+  transfer_flags_ = transfer_flags;
 }
 
 bool ShmAlgoService::EnsureMapping() {
@@ -49,27 +79,66 @@ bool ShmAlgoService::EnsureMapping() {
   if (header_ != nullptr) {
     return true;
   }
+  if (shm_name_.empty()) {
+    LogToStderr(LogSeverity::kWarning, "[shm] EnsureMapping: shm_name 为空");
+    return false;
+  }
+
+  const std::size_t want_total = shm::ShmTotalSizeForFlags(transfer_flags_);
+  const std::size_t want_arena = shm::BlobArenaSizeForFlags(transfer_flags_);
+  mapped_total_size_ = want_total;
+  blob_arena_size_ = want_arena;
+
+  SetLastError(0);
   HANDLE file = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                   static_cast<DWORD>(shm::kShmTotalSize), shm_name_.c_str());
+                                   static_cast<DWORD>(mapped_total_size_), shm_name_.c_str());
   if (file == nullptr) {
+    std::ostringstream oss;
+    oss << "[shm] CreateFileMapping 失败 name=" << shm_name_ << " err=" << GetLastError();
+    LogToStderr(LogSeverity::kWarning, oss.str());
     return false;
   }
-  mapping_ = MapViewOfFile(file, FILE_MAP_ALL_ACCESS, 0, 0, shm::kShmTotalSize);
-  CloseHandle(file);
+  mapping_handle_ = file;
+
+  mapping_ = MapViewOfFile(file, FILE_MAP_ALL_ACCESS, 0, 0, 0);
   if (mapping_ == nullptr) {
+    std::ostringstream oss;
+    oss << "[shm] MapViewOfFile 失败 name=" << shm_name_ << " err=" << GetLastError();
+    LogToStderr(LogSeverity::kWarning, oss.str());
+    CloseHandle(file);
+    mapping_handle_ = nullptr;
     return false;
   }
+
+  // 若打开的是已有映射且实际更小，按可用区域收紧 arena，避免越界写
+  MEMORY_BASIC_INFORMATION mbi{};
+  if (VirtualQuery(mapping_, &mbi, sizeof(mbi)) != 0 && mbi.RegionSize >= shm::kShmHeaderSize) {
+    const std::size_t available = mbi.RegionSize - shm::kShmHeaderSize;
+    if (available < blob_arena_size_) {
+      blob_arena_size_ = available;
+      mapped_total_size_ = shm::kShmHeaderSize + blob_arena_size_;
+    }
+  }
+
   header_ = static_cast<shm::ShmHeader*>(mapping_);
   blob_arena_ = shm::BlobArenaBase(header_);
-  if (header_->magic != shm::kMagic || header_->version != shm::kVersion) {
-    std::memset(header_, 0, shm::kShmTotalSize);
-    header_->magic = shm::kMagic;
-    header_->version = shm::kVersion;
-    header_->state = shm::State::kIdle;
+  if (header_->magic != shm::kMagic || header_->version != shm::kVersion ||
+      header_->blob_arena_bytes == 0) {
+    InitShmHeaderOnly(header_, blob_arena_size_);
+  } else {
+    header_->blob_arena_bytes = static_cast<std::uint64_t>(blob_arena_size_);
+    header_->vision_pid = static_cast<std::uint32_t>(GetCurrentProcessId());
   }
-  // 每通道独立命名互斥量，避免双工位互相阻塞
+
   mutex_ = CreateMutexA(nullptr, FALSE, mutex_name_.c_str());
-  return mutex_ != nullptr;
+  event_ = CreateEventA(nullptr, FALSE, FALSE, event_name_.c_str());  // auto-reset
+  if (mutex_ == nullptr || event_ == nullptr) {
+    LogToStderr(LogSeverity::kWarning, "[shm] CreateMutex/Event 失败");
+    CloseMapping();
+    return false;
+  }
+
+  return true;
 #else
   return false;
 #endif
@@ -83,15 +152,22 @@ void ShmAlgoService::CloseMapping() {
     header_ = nullptr;
     blob_arena_ = nullptr;
   }
+  if (mapping_handle_ != nullptr) {
+    CloseHandle(static_cast<HANDLE>(mapping_handle_));
+    mapping_handle_ = nullptr;
+  }
   if (mutex_ != nullptr) {
     CloseHandle(static_cast<HANDLE>(mutex_));
     mutex_ = nullptr;
+  }
+  if (event_ != nullptr) {
+    CloseHandle(static_cast<HANDLE>(event_));
+    event_ = nullptr;
   }
 #endif
 }
 
 bool ShmAlgoService::Start() {
-  // 阶段 1.3：创建/映射 SHM 与互斥量（SequenceEngine::Start 时调用）
   return EnsureMapping();
 }
 
@@ -101,13 +177,25 @@ void ShmAlgoService::Stop() {
 
 bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout_ms) {
   if (resp == nullptr || !EnsureMapping()) {
+    if (resp) {
+      resp->ok = false;
+      resp->message = "shm mapping failed";
+    }
     return false;
   }
 #ifdef _WIN32
   HANDLE mtx = static_cast<HANDLE>(mutex_);
-  if (WaitForSingleObject(mtx, 5000) != WAIT_OBJECT_0) {
+  HANDLE evt = static_cast<HANDLE>(event_);
+  if (!WaitShmMutex(mtx, 5000)) {
     resp->ok = false;
     resp->message = "shm mutex timeout";
+    return false;
+  }
+
+  if (header_->state != shm::State::kIdle && header_->state != shm::State::kError) {
+    resp->ok = false;
+    resp->message = "shm not idle";
+    ReleaseMutex(mtx);
     return false;
   }
 
@@ -116,28 +204,49 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
   header_->station_id = static_cast<std::int32_t>(req.station);
   header_->error_message[0] = '\0';
 
-  // 按 input_mode 写入：在线拷贝 blob / 回放仅写 session_dir
   std::string write_error;
-  if (!shm::WriteRequestToShm(header_, blob_arena_, shm::kBlobArenaSize, req, &write_error)) {
+  if (!shm::WriteRequestToShm(header_, blob_arena_, blob_arena_size_, req, &write_error)) {
     resp->ok = false;
     resp->message = write_error.empty() ? "shm write failed" : write_error;
+    header_->state = shm::State::kIdle;
     ReleaseMutex(mtx);
     return false;
   }
 
   header_->state = shm::State::kRequestPosted;
+  const std::uint32_t posted_seq = seq_;
+  MemoryBarrier();
   ReleaseMutex(mtx);
+  if (evt != nullptr) {
+    SetEvent(evt);
+  }
 
-  // 轮询等待算法置 kDone 或 kError（超时由 setting.json algo.timeoutMs 控制）
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (std::chrono::steady_clock::now() < deadline) {
+    if (!IsAlgoProcessAlive()) {
+      resp->ok = false;
+      resp->message = "algo process dead";
+      if (WaitShmMutex(mtx, 500)) {
+        if (header_->seq_id == posted_seq) {
+          header_->state = shm::State::kIdle;
+          std::strncpy(header_->error_message, "process dead", sizeof(header_->error_message) - 1);
+        }
+        ReleaseMutex(mtx);
+      }
+      return false;
+    }
+
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    if (WaitForSingleObject(mtx, 100) != WAIT_OBJECT_0) {
+    if (!WaitShmMutex(mtx, 100)) {
       continue;
     }
     const auto st = header_->state;
     if (st == shm::State::kDone) {
-      // 读取算法写回的 5 条 Log，复位为 kIdle
+      if (header_->seq_id != posted_seq) {
+        header_->state = shm::State::kIdle;
+        ReleaseMutex(mtx);
+        continue;
+      }
       for (std::size_t i = 0; i < shm::kLogCount; ++i) {
         resp->logs[i] = FromShm(header_->logs[i]);
       }
@@ -147,6 +256,11 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
       return true;
     }
     if (st == shm::State::kError) {
+      if (header_->seq_id != posted_seq) {
+        header_->state = shm::State::kIdle;
+        ReleaseMutex(mtx);
+        continue;
+      }
       resp->ok = false;
       resp->message = header_->error_message;
       header_->state = shm::State::kIdle;
@@ -156,13 +270,12 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
     ReleaseMutex(mtx);
   }
 
-  // 超时：强制复位状态机，避免后续周期永久卡住
   resp->ok = false;
   resp->message = "algo timeout";
-  if (WaitForSingleObject(mtx, 2000) == WAIT_OBJECT_0) {
-    const auto st = header_->state;
-    if (st == shm::State::kRequestPosted || st == shm::State::kBusy || st == shm::State::kDone ||
-        st == shm::State::kError) {
+  if (WaitShmMutex(mtx, 2000)) {
+    if (header_->seq_id == posted_seq &&
+        (header_->state == shm::State::kRequestPosted || header_->state == shm::State::kBusy ||
+         header_->state == shm::State::kDone || header_->state == shm::State::kError)) {
       header_->state = shm::State::kIdle;
       std::strncpy(header_->error_message, "timeout reset", sizeof(header_->error_message) - 1);
     }
@@ -180,11 +293,26 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
 
 void ShmAlgoServicePool::Configure(shm::ShmChannelId channel, std::string shm_name,
                                    std::string mutex_name) {
+  if (shm_name.empty()) {
+    shm_name = shm::ShmNameForChannel(channel);
+  }
+  if (mutex_name.empty()) {
+    mutex_name = shm::MutexNameForChannel(channel);
+  }
   auto svc = std::make_shared<ShmAlgoService>(std::move(shm_name), std::move(mutex_name));
   if (channel == shm::ShmChannelId::kR09) {
     r09_ = std::move(svc);
   } else {
     r05_ = std::move(svc);
+  }
+}
+
+void ShmAlgoServicePool::SetTransferFlags(std::uint32_t transfer_flags) {
+  if (r05_) {
+    r05_->SetTransferFlags(transfer_flags);
+  }
+  if (r09_) {
+    r09_->SetTransferFlags(transfer_flags);
   }
 }
 
@@ -200,12 +328,8 @@ bool ShmAlgoServicePool::Start() {
 }
 
 void ShmAlgoServicePool::Stop() {
-  if (r05_) {
-    r05_->Stop();
-  }
-  if (r09_) {
-    r09_->Stop();
-  }
+  // 注意：不要在产线 Stop 时拆掉 SHM。映射生命周期应与主程序/算法进程一致。
+  // 若此处 Unmap，易与仍在运行的算法进程脱节。真正释放在 ~ShmAlgoService / 进程退出。
 }
 
 IAlgoService* ShmAlgoServicePool::TryForStation(StationId station) {
@@ -221,7 +345,6 @@ IAlgoService& ShmAlgoServicePool::ForStation(StationId station) {
   if (svc != nullptr) {
     return *svc;
   }
-  // 配置缺失时回退到已有通道，启动阶段应保证双通道均 Configure
   if (r05_) {
     return *r05_;
   }
@@ -233,7 +356,6 @@ IAlgoService& ShmAlgoServicePool::ForStation(StationId station) {
 }
 
 bool MockAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout_ms) {
-  // useShm=false 时进程内 Mock，不经 SHM，用于无算法 EXE 的调试
   (void)req;
   (void)timeout_ms;
   if (resp == nullptr) {
@@ -264,7 +386,6 @@ bool MockAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeou
     }
   }
   resp->ok = true;
-  resp->message.clear();
   return true;
 }
 

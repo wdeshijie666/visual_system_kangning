@@ -49,8 +49,8 @@ class AlgoProcessManager : public QObject {
   QString program_dir_;
   QString program_exe_;
   bool simulation_mode_ = false;
-  int simulation_image_width_ = 2040;
-  int simulation_image_height_ = 1080;
+  int simulation_image_width_ = 2448;
+  int simulation_image_height_ = 2048;
   visual::SimulationResultProfile simulation_algo_result_{};
   bool intentional_stop_ = false;
   bool restart_pending_ = false;

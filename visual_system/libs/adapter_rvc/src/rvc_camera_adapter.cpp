@@ -6,9 +6,11 @@
 #include "visual/rvc_camera_adapter.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -17,6 +19,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "visual/log_format.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -441,13 +445,29 @@ class StubRvcCamera final : public ICamera3D {
       : id_(std::move(id)), serial_(std::move(serial)), options_(options) {}
 
   bool Connect() override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     connected_ = true;
     return true;
   }
-  void Disconnect() override { connected_ = false; }
-  bool IsConnected() const override { return connected_; }
+  void Disconnect() override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    connected_ = false;
+  }
+  bool IsConnected() const override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    return connected_;
+  }
+
+  CameraProbeResult ProbeAlive() override {
+    std::unique_lock<std::recursive_mutex> lock(api_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      return CameraProbeResult::kBusy;
+    }
+    return connected_ ? CameraProbeResult::kAlive : CameraProbeResult::kDead;
+  }
 
   CameraInfo GetInfo() const override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     CameraInfo info;
     info.id = id_;
     info.serial = serial_;
@@ -457,19 +477,38 @@ class StubRvcCamera final : public ICamera3D {
     return info;
   }
 
-  /** 仿真：生成 uint16 深度 + Mono8 灰度 + 点云；落盘由 dataStub 开关控制（经 SaveCaptureBundleToDir）。 */
-  CaptureBundle Capture() override {
+  /** 仿真：按 opts 生成深度/灰度/点云。 */
+  CaptureBundle Capture(const CaptureCopyOptions& opts = {}) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    const auto t0 = std::chrono::steady_clock::now();
     CaptureBundle bundle;
     bundle.camera_serial = serial_;
-    bundle.depth = MakeStubDepthBuffer(options_.image_width, options_.image_height, options_.solid_black);
-    bundle.gray = MakeStubGrayBuffer(options_.image_width, options_.image_height, options_.solid_black);
-    bundle.pointcloud = MakeStubPointCloudBuffer();
-    bundle.ok = bundle.depth != nullptr;
+    if (opts.copy_depth) {
+      bundle.depth =
+          MakeStubDepthBuffer(options_.image_width, options_.image_height, options_.solid_black);
+    }
+    if (opts.copy_gray) {
+      bundle.gray =
+          MakeStubGrayBuffer(options_.image_width, options_.image_height, options_.solid_black);
+    }
+    if (opts.copy_pointcloud) {
+      bundle.pointcloud = MakeStubPointCloudBuffer();
+    }
+    // 未拷深度时仍视为采图成功（实机落盘可走 SDK；仿真落盘需 depth）
+    bundle.ok = true;
+    if (opts.copy_depth && !bundle.depth) {
+      bundle.ok = false;
+      bundle.error_message = "stub depth alloc failed";
+    }
+    bundle.capture_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
     return bundle;
   }
 
   bool SaveLastCaptureToDir(const std::string& session_dir, const std::string& prefix,
                             CaptureBundle* bundle) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     // CaptureToDir 兼容路径：默认只写深度图（与 dataStub 默认一致）
     if (bundle == nullptr || !bundle->ok || !bundle->depth) {
       return false;
@@ -493,6 +532,7 @@ class StubRvcCamera final : public ICamera3D {
   }
 
   bool LoadRecipeFile(const std::string& file_path, RecipeParamList* out_params = nullptr) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     if (!fs::exists(PathFromUtf8(file_path))) {
       return false;
     }
@@ -507,6 +547,7 @@ class StubRvcCamera final : public ICamera3D {
   std::string serial_;
   StubCameraOptions options_;
   bool connected_ = false;
+  mutable std::recursive_mutex api_mutex_;
 };
 
 #ifdef VISUAL_HAS_RVC_SDK
@@ -598,15 +639,41 @@ class RvcCamera final : public ICamera3D {
 
   ~RvcCamera() override { Disconnect(); }
 
+  /** 释放 SDK 句柄（调用方已持有 api_mutex_）。 */
+  void ReleaseSdkUnlocked() {
+    if (cam_.has_value()) {
+      if (cam_->IsValid()) {
+        cam_->Close();
+      }
+      RVC::X2::Destroy(*cam_);
+      cam_.reset();
+    }
+    if (device_.IsValid()) {
+      RVC::Device::Destroy(device_);
+      device_ = RVC::Device{};
+    }
+    if (system_inited_) {
+      ReleaseRvcSystemInit();
+      system_inited_ = false;
+    }
+    connected_ = false;
+  }
+
   bool Connect() override {
-    if (connected_) {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    if (connected_ && cam_.has_value() && cam_->IsValid() && cam_->IsOpen() &&
+        cam_->IsPhysicallyConnected()) {
       return true;
     }
+    // 半开/假在线：先清句柄再连，避免泄漏或重复 Create
+    ReleaseSdkUnlocked();
+
     auto log_fail = [this](const char* step) {
       const char* msg = RVC::GetLastErrorMessage();
-      std::fprintf(stderr, "[相机] 连接失败 id=%s sn=%s (%s) %s\n", id_.c_str(), serial_.c_str(),
-                   step, msg ? msg : "");
-      std::fflush(stderr);
+      std::ostringstream oss;
+      oss << "相机连接失败 id=" << id_ << " sn=" << serial_ << " (" << step << ") "
+          << (msg ? msg : "");
+      LogToStderr(LogSeverity::kWarning, oss.str());
     };
 
     if (!EnsureRvcSystemInit()) {
@@ -620,8 +687,9 @@ class RvcCamera final : public ICamera3D {
       RVC::Device listed[16];
       size_t actual = 0;
       RVC::SystemListDevices(listed, 16, &actual, RVC::SystemListDeviceType::All);
-      std::fprintf(stderr, "[相机] 未找到序列号=%s，当前在线=%zu 台\n", serial_.c_str(), actual);
-      std::fflush(stderr);
+      std::ostringstream oss;
+      oss << "相机未找到序列号=" << serial_ << "，当前在线=" << actual << " 台";
+      LogToStderr(LogSeverity::kWarning, oss.str());
       log_fail("查找设备");
       ReleaseRvcSystemInit();
       system_inited_ = false;
@@ -643,46 +711,38 @@ class RvcCamera final : public ICamera3D {
       return false;
     }
     connected_ = true;
-    // 连接后缓存机内采集参数（含机型实际支持的 capture_mode），并强制软件触发
-    {
-      RVC::X2::CaptureOptions opts;
-      if (cam_->LoadCaptureOptionParameters(opts)) {
-        opts.trigger_mode = RVC::TriggerMode_SoftWare;
-        recipe_opts_ = opts;
-        has_recipe_opts_ = true;
-      } else {
-        RVC::X2::CaptureOptions fallback;
-        fallback.capture_mode = PickSupportedCaptureMode();
-        fallback.trigger_mode = RVC::TriggerMode_SoftWare;
-        recipe_opts_ = fallback;
-        has_recipe_opts_ = true;
-      }
-    }
+    // 采图使用机内当前参数（无参 Capture），连接后不组装/下发 CaptureOptions
     return true;
   }
 
   void Disconnect() override {
-    if (cam_.has_value()) {
-      if (cam_->IsValid()) {
-        cam_->Close();
-      }
-      RVC::X2::Destroy(*cam_);
-      cam_.reset();
-    }
-    if (device_.IsValid()) {
-      RVC::Device::Destroy(device_);
-      device_ = RVC::Device{};
-    }
-    if (system_inited_) {
-      ReleaseRvcSystemInit();
-      system_inited_ = false;
-    }
-    connected_ = false;
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    ReleaseSdkUnlocked();
   }
 
-  bool IsConnected() const override { return connected_; }
+  bool IsConnected() const override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    return connected_;
+  }
+
+  CameraProbeResult ProbeAlive() override {
+    std::unique_lock<std::recursive_mutex> lock(api_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      return CameraProbeResult::kBusy;
+    }
+    if (!connected_ || !cam_.has_value()) {
+      return CameraProbeResult::kDead;
+    }
+    // 轻量查询：不 Capture、不写参
+    if (!cam_->IsValid() || !cam_->IsOpen() || !cam_->IsPhysicallyConnected()) {
+      connected_ = false;
+      return CameraProbeResult::kDead;
+    }
+    return CameraProbeResult::kAlive;
+  }
 
   CameraInfo GetInfo() const override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     CameraInfo info;
     info.id = id_;
     info.serial = serial_;
@@ -700,67 +760,43 @@ class RvcCamera final : public ICamera3D {
     if (!cam_->Open()) {
       connected_ = false;
       const char* msg = RVC::GetLastErrorMessage();
-      std::fprintf(stderr, "[相机] 重新打开失败 id=%s sn=%s %s\n", id_.c_str(), serial_.c_str(),
-                   msg ? msg : "");
-      std::fflush(stderr);
+      std::ostringstream oss;
+      oss << "相机重新打开失败 id=" << id_ << " sn=" << serial_ << " " << (msg ? msg : "");
+      LogToStderr(LogSeverity::kWarning, oss.str());
       return false;
     }
     connected_ = true;
     return true;
   }
 
-  /** 选一个设备实际支持的 CaptureMode（G51000 等机型常不支持 Normal/Fast）。 */
-  RVC::CaptureMode PickSupportedCaptureMode() {
-    RVC::DeviceInfo info{};
-    unsigned supported = 0;
-    RVC::Device& dev = device_;
-    if (dev.IsValid() && dev.GetDeviceInfo(&info)) {
-      supported = static_cast<unsigned>(info.support_capture_mode);
+  /** 无参 Capture：SDK 从机内加载当前参数，不会把本进程组装的 opts 写回相机。 */
+  bool TryCaptureOnce(const char* step, std::int64_t* out_ms) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = cam_->Capture();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    if (out_ms != nullptr) {
+      *out_ms = ms;
     }
-    const RVC::CaptureMode prefer[] = {
-        RVC::CaptureMode_Ultra,
-        RVC::CaptureMode_AntiInterReflection,
-        RVC::CaptureMode_SwingLineScan,
-        RVC::CaptureMode_Normal,
-        RVC::CaptureMode_Fast,
-        RVC::CaptureMode_FixedLineScan,
-        RVC::CaptureMode_LineArrayShift,
-    };
-    for (RVC::CaptureMode m : prefer) {
-      if (supported == 0 || (supported & static_cast<unsigned>(m)) != 0) {
-        return m;
-      }
-    }
-    return RVC::CaptureMode_Ultra;
-  }
-
-  /** 组装软件触发用的 CaptureOptions（优先机内/配方参数）。 */
-  RVC::X2::CaptureOptions BuildSoftCaptureOptions() {
-    RVC::X2::CaptureOptions opts;
-    if (has_recipe_opts_) {
-      opts = recipe_opts_;
-    } else if (cam_.has_value() && cam_->LoadCaptureOptionParameters(opts)) {
-      // keep loaded mode/exposure
-    } else {
-      opts.capture_mode = PickSupportedCaptureMode();
-    }
-    opts.trigger_mode = RVC::TriggerMode_SoftWare;
-    return opts;
-  }
-
-  bool TryCaptureOnce(const RVC::X2::CaptureOptions& opts, const char* step) {
-    const bool ok = cam_->Capture(opts);
     if (!ok) {
       const char* msg = RVC::GetLastErrorMessage();
-      std::fprintf(stderr, "[相机] 采图失败 id=%s sn=%s (%s) %s\n", id_.c_str(), serial_.c_str(),
-                   step, msg ? msg : "");
-      std::fflush(stderr);
+      std::ostringstream oss;
+      oss << "相机采图失败 id=" << id_ << " sn=" << serial_ << " (" << step << ") 耗时=" << ms
+          << "ms " << (msg ? msg : "");
+      LogToStderr(LogSeverity::kWarning, oss.str());
+    } else {
+      std::ostringstream oss;
+      oss << "相机采图完成 id=" << id_ << " sn=" << serial_ << " (" << step << ") 耗时=" << ms
+          << "ms";
+      LogToStderr(LogSeverity::kInfo, oss.str());
     }
     return ok;
   }
 
-  /** 实机：从 RVC SDK 拷贝 DepthMap/PointMap 到内存 buffer（float64 mm）。 */
-  CaptureBundle Capture() override {
+  /** 实机：按 opts 决定是否拷贝 Depth/PointMap/灰度到堆。 */
+  CaptureBundle Capture(const CaptureCopyOptions& opts = {}) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     CaptureBundle bundle;
     bundle.camera_serial = serial_;
     if (!connected_ || !cam_.has_value()) {
@@ -768,123 +804,112 @@ class RvcCamera final : public ICamera3D {
       return bundle;
     }
 
-    // 始终软件触发：PLC 边沿 → 本进程 Soft Capture。
-    // 禁止无参 Capture()/默认 Normal：部分机型不支持 Normal，会 Collect Failed。
-    RVC::X2::CaptureOptions opts = BuildSoftCaptureOptions();
-    bool captured = TryCaptureOnce(opts, "primary");
+    std::int64_t capture_ms = -1;
+    bool captured = TryCaptureOnce("primary", &capture_ms);
     if (!captured) {
       if (!ReopenCamera()) {
         bundle.error_message = "Capture failed and reopen failed";
+        bundle.capture_ms = capture_ms;
         return bundle;
       }
-      // 回退：机内参数再读一次
-      RVC::X2::CaptureOptions loaded;
-      if (cam_->LoadCaptureOptionParameters(loaded)) {
-        loaded.trigger_mode = RVC::TriggerMode_SoftWare;
-        captured = TryCaptureOnce(loaded, "reopen+loaded");
-        if (captured) {
-          recipe_opts_ = loaded;
-          has_recipe_opts_ = true;
-          opts = loaded;
-        }
-      }
-      if (!captured) {
-        RVC::X2::CaptureOptions fallback;
-        fallback.capture_mode = PickSupportedCaptureMode();
-        fallback.trigger_mode = RVC::TriggerMode_SoftWare;
-        captured = TryCaptureOnce(fallback, "reopen+supported-mode");
-        if (captured) {
-          recipe_opts_ = fallback;
-          has_recipe_opts_ = true;
-          opts = fallback;
-        }
-      }
+      captured = TryCaptureOnce("reopen", &capture_ms);
       if (!captured) {
         const char* msg = RVC::GetLastErrorMessage();
         bundle.error_message =
             std::string("Capture failed: ") + (msg && msg[0] ? msg : "unknown RVC error");
+        bundle.capture_ms = capture_ms;
         return bundle;
       }
     }
+    bundle.capture_ms = capture_ms;
 
-    RVC::DepthMap depth = cam_->GetDepthMap();
-    RVC::PointMap point_map = cam_->GetPointMap();
-
-    if (depth.IsValid()) {
-      const RVC::Size sz = depth.GetSize();
-      const double* src = depth.GetDataConstPtr();
-      if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
-        auto depth_buf = std::make_shared<DepthImageBuffer>();
-        depth_buf->width = static_cast<std::uint32_t>(sz.cols);
-        depth_buf->height = static_cast<std::uint32_t>(sz.rows);
-        depth_buf->format = DepthPixelFormat::kFloat64Mm;
-        const std::size_t bytes =
-            static_cast<std::size_t>(sz.cols) * sz.rows * sizeof(double);
-        depth_buf->data.resize(bytes);
-        std::memcpy(depth_buf->data.data(), src, bytes);
-        bundle.depth = std::move(depth_buf);
-      }
-    }
-
-    if (point_map.IsValid()) {
-      const RVC::Size sz = point_map.GetSize();
-      const double* src = point_map.GetPointDataConstPtr();
-      if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
-        auto pc_buf = std::make_shared<PointCloudBuffer>();
-        pc_buf->format = PointCloudFormat::kXyzFloat64Mm;
-        pc_buf->point_count = static_cast<std::uint64_t>(sz.cols) * sz.rows;
-        const std::size_t bytes = pc_buf->point_count * 3 * sizeof(double);
-        pc_buf->data.resize(bytes);
-        std::memcpy(pc_buf->data.data(), src, bytes);
-        bundle.pointcloud = std::move(pc_buf);
-      }
-    }
-
-    RVC::Image img = cam_->GetImage(RVC::CameraID_Left);
-    if (img.IsValid()) {
-      const RVC::Size sz = img.GetSize();
-      const unsigned char* src = img.GetDataConstPtr();
-      if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
-        auto gray = std::make_shared<GrayImageBuffer>();
-        gray->width = static_cast<std::uint32_t>(sz.cols);
-        gray->height = static_cast<std::uint32_t>(sz.rows);
-        const std::size_t pixel_count = static_cast<std::size_t>(sz.cols) * sz.rows;
-        gray->data.resize(pixel_count);
-        const auto type = img.GetType();
-        if (type == RVC::ImageType::Mono8) {
-          std::memcpy(gray->data.data(), src, pixel_count);
-        } else if (type == RVC::ImageType::RGB8) {
-          for (std::size_t i = 0; i < pixel_count; ++i) {
-            const unsigned char r = src[i * 3 + 0];
-            const unsigned char g = src[i * 3 + 1];
-            const unsigned char b = src[i * 3 + 2];
-            gray->data[i] = static_cast<std::uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
-          }
-        } else if (type == RVC::ImageType::BGR8) {
-          for (std::size_t i = 0; i < pixel_count; ++i) {
-            const unsigned char b = src[i * 3 + 0];
-            const unsigned char g = src[i * 3 + 1];
-            const unsigned char r = src[i * 3 + 2];
-            gray->data[i] = static_cast<std::uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
-          }
-        } else {
-          gray.reset();
+    if (opts.copy_depth) {
+      RVC::DepthMap depth = cam_->GetDepthMap();
+      if (depth.IsValid()) {
+        const RVC::Size sz = depth.GetSize();
+        const double* src = depth.GetDataConstPtr();
+        if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
+          auto depth_buf = std::make_shared<DepthImageBuffer>();
+          depth_buf->width = static_cast<std::uint32_t>(sz.cols);
+          depth_buf->height = static_cast<std::uint32_t>(sz.rows);
+          depth_buf->format = DepthPixelFormat::kFloat64Mm;
+          const std::size_t bytes =
+              static_cast<std::size_t>(sz.cols) * sz.rows * sizeof(double);
+          depth_buf->data.resize(bytes);
+          std::memcpy(depth_buf->data.data(), src, bytes);
+          bundle.depth = std::move(depth_buf);
         }
-        bundle.gray = std::move(gray);
       }
     }
 
-    bundle.ok = bundle.depth != nullptr;
-    if (!bundle.ok) {
+    if (opts.copy_pointcloud) {
+      RVC::PointMap point_map = cam_->GetPointMap();
+      if (point_map.IsValid()) {
+        const RVC::Size sz = point_map.GetSize();
+        const double* src = point_map.GetPointDataConstPtr();
+        if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
+          auto pc_buf = std::make_shared<PointCloudBuffer>();
+          pc_buf->format = PointCloudFormat::kXyzFloat64Mm;
+          pc_buf->point_count = static_cast<std::uint64_t>(sz.cols) * sz.rows;
+          const std::size_t bytes = pc_buf->point_count * 3 * sizeof(double);
+          pc_buf->data.resize(bytes);
+          std::memcpy(pc_buf->data.data(), src, bytes);
+          bundle.pointcloud = std::move(pc_buf);
+        }
+      }
+    }
+
+    if (opts.copy_gray) {
+      RVC::Image img = cam_->GetImage(RVC::CameraID_Left);
+      if (img.IsValid()) {
+        const RVC::Size sz = img.GetSize();
+        const unsigned char* src = img.GetDataConstPtr();
+        if (src != nullptr && sz.cols > 0 && sz.rows > 0) {
+          auto gray = std::make_shared<GrayImageBuffer>();
+          gray->width = static_cast<std::uint32_t>(sz.cols);
+          gray->height = static_cast<std::uint32_t>(sz.rows);
+          const std::size_t pixel_count = static_cast<std::size_t>(sz.cols) * sz.rows;
+          gray->data.resize(pixel_count);
+          const auto type = img.GetType();
+          if (type == RVC::ImageType::Mono8) {
+            std::memcpy(gray->data.data(), src, pixel_count);
+          } else if (type == RVC::ImageType::RGB8) {
+            for (std::size_t i = 0; i < pixel_count; ++i) {
+              const unsigned char r = src[i * 3 + 0];
+              const unsigned char g = src[i * 3 + 1];
+              const unsigned char b = src[i * 3 + 2];
+              gray->data[i] = static_cast<std::uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
+            }
+          } else if (type == RVC::ImageType::BGR8) {
+            for (std::size_t i = 0; i < pixel_count; ++i) {
+              const unsigned char b = src[i * 3 + 0];
+              const unsigned char g = src[i * 3 + 1];
+              const unsigned char r = src[i * 3 + 2];
+              gray->data[i] = static_cast<std::uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
+            }
+          } else {
+            gray.reset();
+          }
+          bundle.gray = std::move(gray);
+        }
+      }
+    }
+
+    // SDK 采图成功即 ok；深度堆拷贝按需。落盘仍可用机内 DepthMap。
+    bundle.ok = true;
+    if (opts.copy_depth && !bundle.depth) {
+      bundle.ok = false;
       bundle.error_message = "Capture ok but DepthMap invalid/empty";
-      std::fprintf(stderr, "[相机] 采图成功但深度为空 id=%s sn=%s\n", id_.c_str(), serial_.c_str());
-      std::fflush(stderr);
+      std::ostringstream oss;
+      oss << "相机采图成功但深度为空 id=" << id_ << " sn=" << serial_;
+      LogToStderr(LogSeverity::kWarning, oss.str());
     }
     return bundle;
   }
 
   bool SaveLastCaptureToDir(const std::string& session_dir, const std::string& prefix,
                             CaptureBundle* bundle) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     // 实机：RVC::DepthMap::SaveDepthMap → TIFF（须在下次 Capture 前调用）
     if (bundle == nullptr || !bundle->ok || !connected_ || !cam_.has_value()) {
       return false;
@@ -964,6 +989,7 @@ class RvcCamera final : public ICamera3D {
   }
 
   bool LoadRecipeFile(const std::string& file_path, RecipeParamList* out_params = nullptr) override {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     if (!connected_ || !cam_.has_value()) {
       return false;
     }
@@ -999,16 +1025,14 @@ class RvcCamera final : public ICamera3D {
       return false;
     }
 
-    RVC::X2::CaptureOptions opts;
-    if (cam_->LoadCaptureOptionParameters(opts)) {
-      opts.trigger_mode = RVC::TriggerMode_SoftWare;
-      recipe_opts_ = opts;
-      has_recipe_opts_ = true;
-      if (out_params != nullptr) {
+    // 仅用于 UI 展示；采图仍走无参 Capture()，使用机内（含本配方）当前参数
+    if (out_params != nullptr) {
+      RVC::X2::CaptureOptions opts;
+      if (cam_->LoadCaptureOptionParameters(opts)) {
         FillRecipeParamsFromCaptureOptions(opts, out_params);
+      } else {
+        FillRecipeParamsFromJsonFile(file_path, out_params);
       }
-    } else if (out_params != nullptr) {
-      FillRecipeParamsFromJsonFile(file_path, out_params);
     }
     return true;
   }
@@ -1020,8 +1044,8 @@ class RvcCamera final : public ICamera3D {
   std::optional<RVC::X2> cam_;
   bool connected_ = false;
   bool system_inited_ = false;
-  bool has_recipe_opts_ = false;
-  RVC::X2::CaptureOptions recipe_opts_{};
+  /** 串行化 Connect/Capture/Disconnect/配方加载，避免巡检与周期采图并发踩 SDK。 */
+  mutable std::recursive_mutex api_mutex_;
 };
 #endif
 

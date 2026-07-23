@@ -157,6 +157,9 @@ struct CaptureBundle {
   /** Capture 失败时的简短原因（供日志）。 */
   std::string error_message;
 
+  /** 单次采集耗时（毫秒）：实机为 SDK Capture()；<0 表示未统计。 */
+  std::int64_t capture_ms = -1;
+
   std::shared_ptr<DepthImageBuffer> depth;
 
   std::shared_ptr<PointCloudBuffer> pointcloud;

@@ -2,10 +2,14 @@
 
 #include <QApplication>
 #include <QAction>
+#include <QCloseEvent>
 #include <QCoreApplication>
+#include <QDialog>
 #include <QFile>
 #include <QFileDialog>
 #include <QFrame>
+#include <QLabel>
+#include <QMessageBox>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMetaObject>
@@ -16,9 +20,12 @@
 #include <QStatusBar>
 #include <QStringList>
 #include <QStyle>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolBar>
+#include <QVBoxLayout>
 
 #include <thread>
 
@@ -31,6 +38,7 @@
 #include "visual/app_context.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
+#include "visual/log_format.h"
 #include "visual/sequence_engine.h"
 
 namespace {
@@ -108,9 +116,9 @@ void ApplySavedSizes(QSplitter* splitter, const QList<int>& saved_sizes) {
   splitter->setSizes(ScaleSavedSizesToExtent(saved_sizes, extent));
 }
 
-/** 主布局 stretch(0,1,0)：左右保持快照宽度，中间占据剩余空间。 */
+/** 主布局 stretch：左侧保持快照宽度，中间占剩余空间。 */
 void ApplyMainSplitReset(QSplitter* main_split, const WindowLayoutSnapshot& snapshot) {
-  if (main_split == nullptr || snapshot.main_sizes.size() < 3) {
+  if (main_split == nullptr || snapshot.main_sizes.size() < 2) {
     return;
   }
   const int extent = SplitterAvailableExtent(main_split);
@@ -119,13 +127,10 @@ void ApplyMainSplitReset(QSplitter* main_split, const WindowLayoutSnapshot& snap
   }
 
   const int saved_left = snapshot.main_sizes[0];
-  const int saved_right = snapshot.main_sizes[2];
-
   if (main_split->width() >= snapshot.central_size.width()) {
     int left = qMin(saved_left, extent - 1);
-    int right = qMin(saved_right, extent - left - 1);
-    int center = qMax(1, extent - left - right);
-    main_split->setSizes({left, center, right});
+    int center = qMax(1, extent - left);
+    main_split->setSizes({left, center});
     return;
   }
 
@@ -141,6 +146,21 @@ bool SizeCloseEnough(const QSize& lhs, const QSize& rhs, int tolerance = 2) {
 MainWindow::MainWindow(std::shared_ptr<visual::SequenceEngine> engine, bool simulation_mode, QWidget* parent)
     : QMainWindow(parent), engine_(std::move(engine)), simulation_mode_(simulation_mode) {}
 
+MainWindow::~MainWindow() {
+  PrepareForAppExit();
+}
+
+void MainWindow::PrepareForAppExit() {
+  JoinOfflineWorker();
+  offline_op_busy_ = false;
+}
+
+void MainWindow::JoinOfflineWorker() {
+  if (offline_worker_.joinable()) {
+    offline_worker_.join();
+  }
+}
+
 void MainWindow::LoadTheme() {
   QFile f(":/dark.qss");
   if (f.open(QIODevice::ReadOnly)) {
@@ -150,13 +170,14 @@ void MainWindow::LoadTheme() {
 
 void MainWindow::InitUi() {
   LoadTheme();
-  const auto& settings = visual::AppContext::Instance().Settings();
-  const QString mode_suffix = simulation_mode_ ? tr(" [仿真]") : tr(" [实机]");
-  setWindowTitle(QString::fromStdString(settings.app_name) + mode_suffix);
+  // 标题：左产品名，右公司名（标准标题栏用 "—" 分隔）
+  setWindowTitle(QStringLiteral("SmartGuide — TanlyMind"));
 
   auto* file_menu = menuBar()->addMenu(tr("文件"));
   file_menu->addAction(tr("退出"), this, &QWidget::close);
-  menuBar()->addMenu(tr("设备"));
+
+  auto* device_menu = menuBar()->addMenu(tr("设备"));
+  device_menu->addAction(tr("2D相机参数导入"), this, &MainWindow::OnOpen2DCameraImport);
 
   auto* offline_menu = menuBar()->addMenu(tr("离线测试"));
   offline_menu_ = offline_menu;
@@ -175,15 +196,27 @@ void MainWindow::InitUi() {
   stop_engine_button_->setObjectName(QStringLiteral("btnEngineStop"));
   toolbar->addWidget(start_engine_button_);
   toolbar->addWidget(stop_engine_button_);
+  toolbar->addSeparator();
+  offline_test_ = new OfflineTestWidget(this);
+  offline_test_->SetRunHandler([this](int station) {
+    StartAsyncOfflineCycle(static_cast<visual::StationId>(station));
+  });
+  toolbar->addWidget(offline_test_);
   connect(start_engine_button_, &QPushButton::clicked, this, &MainWindow::OnStartEngine);
   connect(stop_engine_button_, &QPushButton::clicked, this, &MainWindow::OnStopEngine);
 
+  // 左 20%：设备状态 + 日志；中 80%：灰度图(7) + 结果表(3)
   main_split_ = MakeSplitter(Qt::Horizontal, this);
 
-  auto* left_split = MakeSplitter(Qt::Vertical, main_split_);
-  device_status_ = new DeviceStatusWidget(left_split);
-  left_split->addWidget(device_status_);
-  left_split->setMinimumWidth(180);
+  left_split_ = MakeSplitter(Qt::Vertical, main_split_);
+  device_status_ = new DeviceStatusWidget(left_split_);
+  log_view_ = new QTextEdit(left_split_);
+  log_view_->setReadOnly(true);
+  left_split_->addWidget(device_status_);
+  left_split_->addWidget(log_view_);
+  left_split_->setStretchFactor(0, 3);
+  left_split_->setStretchFactor(1, 7);
+  left_split_->setMinimumWidth(180);
 
   center_split_ = MakeSplitter(Qt::Vertical, main_split_);
 
@@ -205,40 +238,40 @@ void MainWindow::InitUi() {
 
   center_split_->addWidget(viewport_split_);
   center_split_->addWidget(result_split_);
-  center_split_->setStretchFactor(0, 3);
-  center_split_->setStretchFactor(1, 2);
+  center_split_->setStretchFactor(0, 7);
+  center_split_->setStretchFactor(1, 3);
 
-  right_split_ = MakeSplitter(Qt::Vertical, main_split_);
-  camera_manager_ = new CameraManagerWidget(right_split_);
-  log_view_ = new QTextEdit(right_split_);
-  log_view_->setReadOnly(true);
-  right_split_->addWidget(camera_manager_);
-  right_split_->addWidget(log_view_);
-  right_split_->setMinimumWidth(220);
-
-  main_split_->addWidget(left_split);
+  main_split_->addWidget(left_split_);
   main_split_->addWidget(center_split_);
-  main_split_->addWidget(right_split_);
   main_split_->setStretchFactor(0, 0);
   main_split_->setStretchFactor(1, 1);
-  main_split_->setStretchFactor(2, 0);
-  main_split_->setSizes({280, 900, 320});
-
-  center_split_->setSizes({520, 280});
-  viewport_split_->setSizes({500, 500});
-  result_split_->setSizes({500, 500});
-  right_split_->setSizes({420, 220});
+  // 左:中 = 20:80；图:表 = 7:3
+  main_split_->setSizes({240, 960});
+  left_split_->setSizes({210, 490});
+  center_split_->setSizes({560, 240});
+  viewport_split_->setSizes({480, 480});
+  result_split_->setSizes({480, 480});
 
   setCentralWidget(main_split_);
 
-  // 手动触发：后台线程跑 RunOfflineCycle，UI 只做 Busy 门禁，避免采图/算法卡住界面
-  offline_test_ = new OfflineTestWidget(this);
-  offline_test_->SetRunHandler([this](int station) {
-    StartAsyncOfflineCycle(static_cast<visual::StationId>(station));
+  station_r05_status_ = new QLabel(tr("R05: 空闲"), this);
+  station_r09_status_ = new QLabel(tr("R09: 空闲"), this);
+  station_r05_idle_timer_ = new QTimer(this);
+  station_r09_idle_timer_ = new QTimer(this);
+  station_r05_idle_timer_->setSingleShot(true);
+  station_r09_idle_timer_->setSingleShot(true);
+  connect(station_r05_idle_timer_, &QTimer::timeout, this, [this]() {
+    SetStationUiStatus(visual::StationId::kR05, StationCycleUiStatus::kIdle);
   });
-  statusBar()->addPermanentWidget(offline_test_);
+  connect(station_r09_idle_timer_, &QTimer::timeout, this, [this]() {
+    SetStationUiStatus(visual::StationId::kR09, StationCycleUiStatus::kIdle);
+  });
+  statusBar()->addPermanentWidget(station_r05_status_);
+  statusBar()->addPermanentWidget(station_r09_status_);
   UpdateEngineControlState(false);
 
+  connect(&visual::EventBus::Instance(), &visual::EventBus::CycleStarted, this,
+          &MainWindow::OnCycleStarted);
   connect(&visual::EventBus::Instance(), &visual::EventBus::CycleCompleted, this,
           &MainWindow::OnCycleCompleted);
   connect(&visual::EventBus::Instance(), &visual::EventBus::LogLine, this, &MainWindow::OnLogLine);
@@ -274,48 +307,14 @@ void MainWindow::InitUi() {
     device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   }
 
-  // 勿强制写成“初始化/未运行”：main 里算法可能已启动，信号可能在订阅前发出
   if (visual::AppContext::Instance().Settings().use_shm_algo) {
     const bool ready = visual::EventBus::IsAlgoProcessReady();
     device_status_->SetAlgoStatus(ready, ready ? tr("运行中") : tr("未就绪"));
   } else {
-    // 进程内 Mock 视为算法就绪（无独立进程）
     device_status_->SetAlgoStatus(true, simulation_mode_ ? tr("进程内 Mock 仿真") : tr("进程内 Mock"));
   }
 
   ApplyProductionStartInterlock();
-
-  camera_manager_->SetImportRecipeHandler([this](const QString& path) {
-    if (!engine_) {
-      return;
-    }
-    const std::string utf8_path = path.toUtf8().constData();
-    const auto& devices = visual::AppContext::Instance().Devices();
-    int loaded = 0;
-    visual::RecipeParamList params;
-    for (const auto& kv : devices) {
-      auto cam = engine_->GetCamera(kv.second.id);
-      visual::RecipeParamList one;
-      if (cam && cam->LoadRecipeFile(utf8_path, &one)) {
-        ++loaded;
-        if (params.empty() && !one.empty()) {
-          params = std::move(one);
-        }
-      }
-    }
-    if (loaded > 0) {
-      if (!params.empty()) {
-        camera_manager_->SetRecipeParams(params);
-      }
-      visual::EventBus::Instance().NotifyLog(
-          QStringLiteral("配方导入成功: %1 → %2 台相机").arg(path).arg(loaded));
-      statusBar()->showMessage(tr("配方导入成功"), 3000);
-    } else {
-      visual::EventBus::Instance().NotifyLog(
-          QStringLiteral("配方导入失败: %1（请确认相机已连接）").arg(path));
-      statusBar()->showMessage(tr("配方导入失败"), 5000);
-    }
-  });
 
   qRegisterMetaType<visual::AlarmRecord>("visual::AlarmRecord");
   connect(&visual::AlarmService::Instance(), &visual::AlarmService::AlarmRaised, this,
@@ -337,6 +336,81 @@ void MainWindow::InitUi() {
           });
 
   statusBar()->showMessage(tr("就绪"));
+  // 初始化完成后自动执行启动（与点击「启动」相同）
+  QTimer::singleShot(500, this, &MainWindow::TryAutoStartEngine);
+}
+
+void MainWindow::BindRecipeImportHandler(CameraManagerWidget* camera_manager) {
+  if (camera_manager == nullptr) {
+    return;
+  }
+  camera_manager->SetImportRecipeHandler([this, camera_manager](const QString& path) {
+    if (!engine_) {
+      return;
+    }
+    const std::string utf8_path = path.toUtf8().constData();
+    const auto& devices = visual::AppContext::Instance().Devices();
+    int loaded = 0;
+    visual::RecipeParamList params;
+    for (const auto& kv : devices) {
+      auto cam = engine_->GetCamera(kv.second.id);
+      visual::RecipeParamList one;
+      if (cam && cam->LoadRecipeFile(utf8_path, &one)) {
+        ++loaded;
+        if (params.empty() && !one.empty()) {
+          params = std::move(one);
+        }
+      }
+    }
+    if (loaded > 0) {
+      if (!params.empty()) {
+        camera_manager->SetRecipeParams(params);
+      }
+      visual::EventBus::Instance().NotifyLog(
+          QStringLiteral("配方导入成功: %1 → %2 台相机").arg(path).arg(loaded));
+      statusBar()->showMessage(tr("配方导入成功"), 3000);
+    } else {
+      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
+          QStringLiteral("配方导入失败: %1（请确认相机已连接）").arg(path));
+      statusBar()->showMessage(tr("配方导入失败"), 5000);
+    }
+  });
+}
+
+void MainWindow::OnOpen2DCameraImport() {
+  QDialog dlg(this);
+  dlg.setWindowTitle(tr("2D相机参数导入"));
+  dlg.resize(520, 700);
+  auto* layout = new QVBoxLayout(&dlg);
+  auto* camera_manager = new CameraManagerWidget(&dlg);
+  BindRecipeImportHandler(camera_manager);
+  layout->addWidget(camera_manager, 1);
+  auto* close_btn = new QPushButton(tr("关闭"), &dlg);
+  connect(close_btn, &QPushButton::clicked, &dlg, &QDialog::accept);
+  layout->addWidget(close_btn);
+  dlg.exec();
+}
+
+void MainWindow::TryAutoStartEngine() {
+  if (auto_start_done_ || engine_ == nullptr || engine_->IsRunning()) {
+    auto_start_done_ = true;
+    return;
+  }
+  if (offline_op_busy_) {
+    QTimer::singleShot(400, this, &MainWindow::TryAutoStartEngine);
+    return;
+  }
+  // 实机：算法进程可能尚未就绪，短暂重试
+  if (!simulation_mode_ && visual::AppContext::Instance().Settings().use_shm_algo &&
+      !visual::EventBus::IsAlgoProcessReady()) {
+    if (auto_start_retries_ < 25) {
+      ++auto_start_retries_;
+      QTimer::singleShot(400, this, &MainWindow::TryAutoStartEngine);
+      return;
+    }
+  }
+  auto_start_done_ = true;
+  OnStartEngine();
 }
 
 void MainWindow::showEvent(QShowEvent* event) {
@@ -346,6 +420,24 @@ void MainWindow::showEvent(QShowEvent* event) {
       QTimer::singleShot(50, this, [this]() { CaptureWindowLayoutSnapshot(); });
     });
   }
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+  QString tip = tr("确定要退出 SmartGuide 吗？");
+  if (engine_ && engine_->IsRunning()) {
+    tip = tr("产线正在运行，确定要退出吗？\n退出前将停止产线并断开设备。");
+  } else if (offline_op_busy_) {
+    tip = tr("手动/回放任务进行中，确定要退出吗？\n将等待当前任务结束后退出。");
+  }
+
+  const auto ret = QMessageBox::question(this, tr("退出确认"), tip,
+                                         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  if (ret != QMessageBox::Yes) {
+    event->ignore();
+    return;
+  }
+  event->accept();
+  QMainWindow::closeEvent(event);
 }
 
 void MainWindow::CaptureWindowLayoutSnapshot() {
@@ -359,18 +451,78 @@ void MainWindow::CaptureWindowLayoutSnapshot() {
   layout_snapshot_.window_state = windowState();
   layout_snapshot_.central_size = main_split_->size();
   layout_snapshot_.main_sizes = main_split_->sizes();
+  layout_snapshot_.left_sizes = left_split_ != nullptr ? left_split_->sizes() : QList<int>{};
   layout_snapshot_.center_sizes = center_split_->sizes();
   layout_snapshot_.viewport_sizes = viewport_split_->sizes();
   layout_snapshot_.result_sizes = result_split_->sizes();
-  layout_snapshot_.right_sizes = right_split_->sizes();
-  layout_snapshot_.valid = layout_snapshot_.main_sizes.size() >= 3 &&
+  layout_snapshot_.valid = layout_snapshot_.main_sizes.size() >= 2 &&
                            layout_snapshot_.center_sizes.size() >= 2 &&
                            layout_snapshot_.central_size.width() > 0 &&
                            layout_snapshot_.central_size.height() > 0;
 }
 
+void MainWindow::SetStationUiStatus(visual::StationId station, StationCycleUiStatus status) {
+  QString text;
+  switch (status) {
+    case StationCycleUiStatus::kWorking:
+      text = tr("工作中");
+      break;
+    case StationCycleUiStatus::kCompleted:
+      text = tr("已完成");
+      break;
+    case StationCycleUiStatus::kFault:
+      text = tr("检测异常");
+      break;
+    case StationCycleUiStatus::kIdle:
+    default:
+      text = tr("空闲");
+      break;
+  }
+  if (QLabel* label = StationStatusLabelFor(station)) {
+    const bool is_r09 = (station == visual::StationId::kR09);
+    label->setText(is_r09 ? tr("R09: %1").arg(text) : tr("R05: %1").arg(text));
+  }
+}
+
+void MainWindow::CancelStationIdleFallback(visual::StationId station) {
+  if (QTimer* timer = StationIdleTimerFor(station)) {
+    timer->stop();
+  }
+}
+
+void MainWindow::ScheduleStationIdleFallback(visual::StationId station) {
+  if (QTimer* timer = StationIdleTimerFor(station)) {
+    timer->start(15000);
+  }
+}
+
+QTimer* MainWindow::StationIdleTimerFor(visual::StationId station) const {
+  return station == visual::StationId::kR09 ? station_r09_idle_timer_ : station_r05_idle_timer_;
+}
+
+QLabel* MainWindow::StationStatusLabelFor(visual::StationId station) const {
+  return station == visual::StationId::kR09 ? station_r09_status_ : station_r05_status_;
+}
+
+void MainWindow::ResetStationCycleStatusLabels() {
+  CancelStationIdleFallback(visual::StationId::kR05);
+  CancelStationIdleFallback(visual::StationId::kR09);
+  SetStationUiStatus(visual::StationId::kR05, StationCycleUiStatus::kIdle);
+  SetStationUiStatus(visual::StationId::kR09, StationCycleUiStatus::kIdle);
+}
+
+void MainWindow::OnCycleStarted(visual::StationId station) {
+  CancelStationIdleFallback(station);
+  SetStationUiStatus(station, StationCycleUiStatus::kWorking);
+}
+
 void MainWindow::OnCycleCompleted(const visual::CycleResultEvent& event) {
-  // 阶段 6.8：EventBus → 刷新工位结果表与深度图视口
+  // 采图失败 / 算法失败 → 检测异常；否则已完成
+  const StationCycleUiStatus status =
+      event.algo_ok ? StationCycleUiStatus::kCompleted : StationCycleUiStatus::kFault;
+  SetStationUiStatus(event.station, status);
+  ScheduleStationIdleFallback(event.station);
+
   if (event.station == visual::StationId::kR09) {
     r09_table_->UpdateResults(event.logs);
     r09_viewport_->SetGrayImage(event.gray_bytes, event.gray_width, event.gray_height);
@@ -382,23 +534,37 @@ void MainWindow::OnCycleCompleted(const visual::CycleResultEvent& event) {
                                .arg(static_cast<int>(event.station))
                                .arg(event.algo_ok)
                                .arg(event.plc_ok));
+  // 熔断后 running_ 已 false 但 worker 可能仍在：UI 线程 Stop 完成 join/停心跳
+  if (engine_ && stop_engine_button_ != nullptr && stop_engine_button_->isEnabled() &&
+      !engine_->IsRunning()) {
+    engine_->Stop();
+    UpdateEngineControlState(false);
+    ResetStationCycleStatusLabels();
+  }
 }
 
 void MainWindow::OnLogLine(const QString& line) {
   log_view_->append(line);
+  constexpr int kMaxLogBlocks = 2000;
+  QTextDocument* doc = log_view_->document();
+  while (doc != nullptr && doc->blockCount() > kMaxLogBlocks) {
+    QTextCursor cursor(doc);
+    cursor.movePosition(QTextCursor::Start);
+    cursor.select(QTextCursor::BlockUnderCursor);
+    cursor.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor);
+    cursor.removeSelectedText();
+  }
 }
 
 void MainWindow::OnStartEngine() {
   if (!engine_ || engine_->IsRunning()) {
     return;
   }
-  // 手动/回放占用中禁止开产线，避免与同工位 CycleMutex / 相机并发
   if (offline_op_busy_) {
     statusBar()->showMessage(tr("手动或回放进行中，请等待结束后再启动产线"), 5000);
     return;
   }
 
-  // 生产模式防呆：PLC / 相机 / 算法任一异常则禁止启动在线运行（手动/离线不受影响）
   if (!simulation_mode_) {
     QString reason;
     if (!EnsureProductionDevicesReady(&reason)) {
@@ -413,6 +579,7 @@ void MainWindow::OnStartEngine() {
   engine_->Start();
   engine_->ResetFaultBreakers();
   device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
+  ResetStationCycleStatusLabels();
   UpdateEngineControlState(true);
   statusBar()->showMessage(tr("SequenceEngine 已启动（离线测试已禁用）"));
 }
@@ -423,6 +590,7 @@ void MainWindow::OnStopEngine() {
   }
   engine_->Stop();
   device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
+  ResetStationCycleStatusLabels();
   UpdateEngineControlState(false);
   statusBar()->showMessage(tr("SequenceEngine 已停止"));
 }
@@ -435,7 +603,6 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
   };
 
   const auto& settings = visual::AppContext::Instance().Settings();
-  // 以引擎实时状态为准刷新相机（仅校验已启用工位）
   if (engine_ != nullptr) {
     for (const auto& kv : visual::AppContext::Instance().Devices()) {
       const bool station_enabled =
@@ -485,7 +652,6 @@ void MainWindow::ApplyProductionStartInterlock() {
   if (start_engine_button_ == nullptr || engine_ == nullptr || engine_->IsRunning()) {
     return;
   }
-  // Busy 时强制禁启动，避免与手动周期抢资源
   if (offline_op_busy_) {
     start_engine_button_->setEnabled(false);
     start_engine_button_->setToolTip(tr("手动或回放进行中，无法启动产线"));
@@ -497,7 +663,6 @@ void MainWindow::ApplyProductionStartInterlock() {
     return;
   }
 
-  // 按钮侧预检：相机 + 算法（PLC 在点击启动时再探测连接）
   QStringList faults;
   if (device_status_ != nullptr) {
     if (!device_status_->AreCamerasOk()) {
@@ -515,7 +680,6 @@ void MainWindow::ApplyProductionStartInterlock() {
 
 void MainWindow::UpdateEngineControlState(bool running) {
   if (start_engine_button_ != nullptr) {
-    // 产线已跑 或 离线 Busy：都不能点启动
     start_engine_button_->setEnabled(!running && !offline_op_busy_);
     start_engine_button_->setProperty("running", running);
     start_engine_button_->style()->unpolish(start_engine_button_);
@@ -536,7 +700,6 @@ void MainWindow::UpdateEngineControlState(bool running) {
 }
 
 void MainWindow::UpdateOfflineTestEnabled(bool enabled) {
-  // 产线运行 或 Busy：离线入口一律关闭
   const bool allow = enabled && !offline_op_busy_;
   if (offline_test_ != nullptr) {
     offline_test_->SetOfflineTestEnabled(allow);
@@ -565,7 +728,6 @@ void MainWindow::SetOfflineOpBusy(bool busy) {
   if (offline_test_ != nullptr) {
     offline_test_->SetBusy(busy);
   }
-  // 按当前产线状态重算启动/离线入口（内部会读 offline_op_busy_）
   const bool running = engine_ && engine_->IsRunning();
   UpdateEngineControlState(running);
 }
@@ -580,18 +742,17 @@ void MainWindow::StartAsyncOfflineCycle(visual::StationId station) {
     return;
   }
   if (engine_->IsRunning()) {
-    // 与 OfflineTestWidget 产线禁用双保险
     statusBar()->showMessage(tr("产线运行中，请先停止后再手动触发"), 5000);
     return;
   }
 
+  JoinOfflineWorker();
   SetOfflineOpBusy(true);
   statusBar()->showMessage(tr("手动周期进行中…"));
 
-  // 持有 engine 的 shared_ptr：窗口关闭后周期仍可安全跑完；回 UI 用 invokeMethod，勿在裸线程里 QTimer
   const auto engine = engine_;
   QPointer<MainWindow> self(this);
-  std::thread([self, engine, station]() {
+  offline_worker_ = std::thread([self, engine, station]() {
     const bool ok = engine->RunOfflineCycle(station);
     if (!self) {
       return;
@@ -606,7 +767,7 @@ void MainWindow::StartAsyncOfflineCycle(visual::StationId station) {
           self->FinishOfflineOp(ok ? QObject::tr("手动周期完成") : QObject::tr("手动周期失败"));
         },
         Qt::QueuedConnection);
-  }).detach();
+  });
 }
 
 void MainWindow::ResetAllSplitters() {
@@ -622,22 +783,24 @@ void MainWindow::ResetAllSplitters() {
 
   if (SizeCloseEnough(current_central, layout_snapshot_.central_size)) {
     main_split_->setSizes(layout_snapshot_.main_sizes);
+    if (left_split_ != nullptr) {
+      left_split_->setSizes(layout_snapshot_.left_sizes);
+    }
     center_split_->setSizes(layout_snapshot_.center_sizes);
     viewport_split_->setSizes(layout_snapshot_.viewport_sizes);
     result_split_->setSizes(layout_snapshot_.result_sizes);
-    right_split_->setSizes(layout_snapshot_.right_sizes);
     return;
   }
 
   ApplyMainSplitReset(main_split_, layout_snapshot_);
   RefreshLayout(main_split_);
 
+  ApplySavedSizes(left_split_, layout_snapshot_.left_sizes);
   ApplySavedSizes(center_split_, layout_snapshot_.center_sizes);
   RefreshLayout(center_split_);
 
   ApplySavedSizes(viewport_split_, layout_snapshot_.viewport_sizes);
   ApplySavedSizes(result_split_, layout_snapshot_.result_sizes);
-  ApplySavedSizes(right_split_, layout_snapshot_.right_sizes);
 }
 
 void MainWindow::OnResetWindowLayout() {
@@ -659,10 +822,9 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
   }
   if (engine_->IsRunning()) {
     statusBar()->showMessage(tr("产线运行中，无法进行历史回放"));
-    visual::EventBus::Instance().NotifyLog(QStringLiteral("产线运行中，历史回放已拒绝"));
+    visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, QStringLiteral("产线运行中，历史回放已拒绝"));
     return;
   }
-  // 目录选择必须在 UI 线程；真正回放放到后台，避免算法阻塞界面
   const QString default_dir =
       QString::fromStdString(visual::ResolveDataRoot(visual::AppContext::Instance().Settings().data_path));
   const QString session_dir =
@@ -671,13 +833,14 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
     return;
   }
 
+  JoinOfflineWorker();
   SetOfflineOpBusy(true);
   statusBar()->showMessage(tr("历史回放进行中…"));
 
   const auto engine = engine_;
   const std::string session = session_dir.toStdString();
   QPointer<MainWindow> self(this);
-  std::thread([self, engine, station, session]() {
+  offline_worker_ = std::thread([self, engine, station, session]() {
     const bool ok = engine->RunReplayCycle(station, session);
     if (!self) {
       return;
@@ -692,7 +855,7 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
           self->FinishOfflineOp(ok ? QObject::tr("历史回放完成") : QObject::tr("历史回放失败"));
         },
         Qt::QueuedConnection);
-  }).detach();
+  });
 }
 
 void MainWindow::OnReplayR05() {

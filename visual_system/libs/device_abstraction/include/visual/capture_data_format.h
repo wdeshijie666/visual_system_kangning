@@ -40,7 +40,7 @@ enum class DepthPixelFormat : std::uint32_t {
 
   kFloat32Mm = 2,  /**< 每像素 float32 毫米 */
 
-  kFloat64Mm = 3,  /**< RVC DepthMap 原生 float64 毫米 */
+  kFloat64Mm = 3,  /**< 枚举名历史遗留：RVC GetDataConstPtr 实为米；TIFF(is_m=false) 为毫米。算法侧对 SHM 路径会 ×1000。 */
 
 };
 
