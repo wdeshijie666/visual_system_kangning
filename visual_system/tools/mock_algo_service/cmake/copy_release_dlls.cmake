@@ -113,11 +113,11 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# 4) MSVC Release CRT（算法进程强制 VC143，匹配 PointCloudProcessor/pcp_c_api）
+# 4) MSVC Release CRT（与当前工具集一致；勿强制 VC143，以免与 v142 引擎混用）
 # ---------------------------------------------------------------------------
 set(_msvc_script "${CMAKE_CURRENT_LIST_DIR}/../../../cmake/deploy_msvc_runtime.cmake")
 if(EXISTS "${_msvc_script}")
-  execute_process(COMMAND ${CMAKE_COMMAND} -DDST=${DST} -DFORCE_VC143=1 -P "${_msvc_script}")
+  execute_process(COMMAND ${CMAKE_COMMAND} -DDST=${DST} -P "${_msvc_script}")
 else()
   message(WARNING "deploy_msvc_runtime.cmake not found: ${_msvc_script}")
 endif()

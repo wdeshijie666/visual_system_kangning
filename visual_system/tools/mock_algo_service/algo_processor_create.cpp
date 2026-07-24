@@ -1,94 +1,143 @@
 /**
  * @file algo_processor_create.cpp
- * @brief 通过 pcp_c_api（VS2022 编译）调用 PointCloudProcessor，避免 VS2019↔VS2022 std::string ABI 崩溃。
+ * @brief 唯一包含 PointCloudProcessor 精简头的翻译单元；以 /EHa 捕获引擎 SEH。
  */
 #include "algo_processor_create.h"
 
-#include "pcp_c_api/pcp_c_api.h"
+#include <fstream>
+#include <sstream>
 
-void PointCloudProcessorDeleter::operator()(PCP_Handle* p) const {
-  pcp_destroy(p);
-}
+#include <nlohmann/json.hpp>
 
-PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& config_path,
-                                                          std::string* error) {
-  char err_buf[512] = {};
-  PCP_Handle* handle = pcp_create(config_path.c_str(), err_buf, static_cast<int>(sizeof(err_buf)));
-  if (handle == nullptr) {
-    if (error) {
-      *error = err_buf[0] != '\0'
-                   ? std::string(err_buf)
-                   : ("算法引擎加载失败: " + config_path);
-    }
-    return nullptr;
-  }
-  return PointCloudProcessorPtr(handle);
+#include "PointCloudProcessor_api.h"
+
+void PointCloudProcessorDeleter::operator()(PointCloudProcessor* p) const {
+  delete p;
 }
 
 namespace {
 
-bool EnsureContinuousDepth(const cv::Mat& depth, cv::Mat* continuous) {
-  if (depth.empty() || continuous == nullptr) {
+bool ValidateConfigFile(const std::string& config_path, std::string* error) {
+  std::ifstream in(config_path, std::ios::binary);
+  if (!in) {
+    if (error) {
+      *error = "无法打开算法配置: " + config_path;
+    }
     return false;
   }
-  if (depth.isContinuous()) {
-    *continuous = depth;
-  } else {
-    *continuous = depth.clone();
+  std::ostringstream oss;
+  oss << in.rdbuf();
+  const std::string text = oss.str();
+  if (text.empty()) {
+    if (error) {
+      *error = "算法配置为空: " + config_path;
+    }
+    return false;
   }
-  return !continuous->empty();
+  try {
+    const auto j = nlohmann::json::parse(text);
+    if (!j.is_object()) {
+      if (error) {
+        *error = "算法配置不是 JSON 对象: " + config_path;
+      }
+      return false;
+    }
+  } catch (const std::exception& ex) {
+    if (error) {
+      *error = std::string("算法配置 JSON 无效: ") + ex.what();
+    }
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
 
-bool PCP_LoadDepthMap(PCP_Handle* p, const cv::Mat& depth) {
-  cv::Mat cont;
-  if (p == nullptr || !EnsureContinuousDepth(depth, &cont)) {
+PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& config_path,
+                                                          std::string* error) {
+  if (!ValidateConfigFile(config_path, error)) {
+    return nullptr;
+  }
+  try {
+    return PointCloudProcessorPtr(new PointCloudProcessor(config_path));
+  } catch (const std::exception& ex) {
+    if (error) {
+      *error = std::string("算法引擎构造异常: ") + ex.what();
+    }
+    return nullptr;
+  } catch (...) {
+    if (error) {
+      *error = "算法引擎构造失败（原生异常）";
+    }
+    return nullptr;
+  }
+}
+
+bool PCP_LoadDepthMap(PointCloudProcessor* p, const cv::Mat& depth) {
+  if (p == nullptr || depth.empty()) {
     return false;
   }
-  return pcp_load_depth_map(p, cont.data, cont.rows, cont.cols, cont.type()) != 0;
+  try {
+    return p->loadDepthMap(depth);
+  } catch (...) {
+    return false;
+  }
 }
 
-std::size_t PCP_GetPointCount(PCP_Handle* p) {
+std::size_t PCP_GetPointCount(PointCloudProcessor* p) {
   if (p == nullptr) {
     return 0;
   }
-  return pcp_get_point_count(p);
+  try {
+    return p->getPointCount();
+  } catch (...) {
+    return 0;
+  }
 }
 
-int PCP_Process(PCP_Handle* p, const cv::Mat& depth, int top_n) {
-  cv::Mat cont;
-  if (p == nullptr || !EnsureContinuousDepth(depth, &cont)) {
+int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, int top_n) {
+  if (p == nullptr || depth.empty()) {
     return -999;
   }
-  return pcp_process(p, cont.data, cont.rows, cont.cols, cont.type(), top_n);
+  try {
+    return p->process(depth, top_n);
+  } catch (...) {
+    return -999;
+  }
 }
 
-std::size_t PCP_GetClusterCount(PCP_Handle* p) {
+std::size_t PCP_GetClusterCount(PointCloudProcessor* p) {
   if (p == nullptr) {
     return 0;
   }
-  return pcp_get_cluster_count(p);
+  try {
+    return p->getClusters().size();
+  } catch (...) {
+    return 0;
+  }
 }
 
-std::vector<PCP_FitResult> PCP_GetFitResults(PCP_Handle* p) {
+std::vector<PCP_FitResult> PCP_GetFitResults(PointCloudProcessor* p) {
   std::vector<PCP_FitResult> out;
   if (p == nullptr) {
     return out;
   }
-  PCP_C_FitResult buf[64];
-  const int n = pcp_get_fit_results(p, buf, 64);
-  out.reserve(static_cast<std::size_t>(n > 0 ? n : 0));
-  for (int i = 0; i < n; ++i) {
-    PCP_FitResult r;
-    r.log_index = buf[i].log_index;
-    r.valid = buf[i].valid != 0;
-    r.offset_x = buf[i].offset_x;
-    r.offset_y = buf[i].offset_y;
-    r.tilt_deg = buf[i].tilt_deg;
-    r.diameter = buf[i].diameter;
-    r.length = buf[i].length;
-    out.push_back(r);
+  try {
+    const auto& fits = p->getFitResults();
+    out.reserve(fits.size());
+    for (const auto& f : fits) {
+      PCP_FitResult r;
+      r.log_index = f.log_index;
+      r.valid = f.valid;
+      r.offset_x = f.offset_x;
+      r.offset_y = f.offset_y;
+      r.tilt_deg = f.tilt_deg;
+      r.diameter = f.diameter;
+      r.length = f.length;
+      out.push_back(r);
+    }
+  } catch (...) {
+    out.clear();
   }
   return out;
 }

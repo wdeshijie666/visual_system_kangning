@@ -1,6 +1,6 @@
 /**
  * @file algo_processor_create.h
- * @brief 算法引擎创建/调用封装（经 pcp_c_api C ABI，跨 MSVC 工具集安全）。
+ * @brief 算法引擎创建与调用封装（唯一包含 PointCloudProcessor 声明的翻译单元入口）。
  */
 #pragma once
 
@@ -12,22 +12,22 @@
 
 #include <opencv2/core.hpp>
 
-struct PCP_Handle;
+class PointCloudProcessor;
 
 struct PointCloudProcessorDeleter {
-  void operator()(PCP_Handle* p) const;
+  void operator()(PointCloudProcessor* p) const;
 };
 
-using PointCloudProcessorPtr = std::unique_ptr<PCP_Handle, PointCloudProcessorDeleter>;
+using PointCloudProcessorPtr = std::unique_ptr<PointCloudProcessor, PointCloudProcessorDeleter>;
 
-/** 构造算法引擎；失败返回空并写入 error。 */
+/** 构造引擎；失败返回空并写入 error。 */
 PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& config_path,
                                                           std::string* error);
 
-bool PCP_LoadDepthMap(PCP_Handle* p, const cv::Mat& depth);
-std::size_t PCP_GetPointCount(PCP_Handle* p);
-int PCP_Process(PCP_Handle* p, const cv::Mat& depth, int top_n);
-std::size_t PCP_GetClusterCount(PCP_Handle* p);
+bool PCP_LoadDepthMap(PointCloudProcessor* p, const cv::Mat& depth);
+std::size_t PCP_GetPointCount(PointCloudProcessor* p);
+int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, int top_n);
+std::size_t PCP_GetClusterCount(PointCloudProcessor* p);
 
 struct PCP_FitResult {
   std::uint16_t log_index = 0;
@@ -39,4 +39,4 @@ struct PCP_FitResult {
   double length = 0;
 };
 
-std::vector<PCP_FitResult> PCP_GetFitResults(PCP_Handle* p);
+std::vector<PCP_FitResult> PCP_GetFitResults(PointCloudProcessor* p);

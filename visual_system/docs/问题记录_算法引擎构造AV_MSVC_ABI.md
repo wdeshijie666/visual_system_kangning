@@ -1,8 +1,20 @@
 # 问题记录：真机算法引擎构造访问冲突（MSVC ABI / CRT）
 
 > 日期：2026-07-24  
-> 状态：已修复（C ABI 桥接 + 强制部署 VC143 CRT）  
+> 状态：**已关闭**（2026-07-24 后：`PointCloudProcessor.dll` 已用 **v142** 重编；仓库已**移除** `pcp_c_api` 桥接，算法进程直接链接引擎）  
 > 影响模块：`alg_program` / `mock_algo_service` / `PointCloudProcessor.dll`
+
+---
+
+## 0. 当前结论（先看这里）
+
+| 项 | 说明 |
+|----|------|
+| 根因 | 当时引擎为 VS2022(**14.44**)，算法进程为 VS2019(**14.29**)，跨 DLL 传 `std::string` 等 C++ 对象导致构造 AV；旁路 VC142 CRT 会加剧问题 |
+| 临时方案（已废弃） | `pcp_c_api` C ABI 桥 + 强制部署 VC143 CRT |
+| **现行方案** | **引擎与 `mock_algo_service` 同为 v142**，直接 `new PointCloudProcessor`；部署旁勿混用另一工具集的 CRT |
+
+以下正文保留事故经过与排查要点，便于以后再踩工具集不一致时对照。
 
 ---
 
@@ -78,58 +90,28 @@ Windows 会**优先加载 exe 旁 DLL**，而不是系统里已安装的较新 V
 
 ---
 
-## 3. 解决方案（已落地）
+## 3. 当时的临时方案（已废弃，勿再部署）
 
-### 3.1 C ABI 桥接 DLL（隔离工具集）
+> **勿再使用**：`pcp_c_api` 源码已从仓库删除；算法进程恢复直接链接 `PointCloudProcessor`。
 
-新增 `pcp_c_api`（**必须用 VS2022 / v143 编译**），与 `PointCloudProcessor.dll` 对齐：
+### 3.1（历史）C ABI 桥接 DLL
 
-- 路径：`tools/mock_algo_service/pcp_c_api/`
-- 导出纯 C 接口：`pcp_create` / `pcp_destroy` / `pcp_load_depth_map` / `pcp_process` / …
-- 深度图以原始缓冲 + `(rows, cols, type)` 传递，**不跨 DLL 传 `std::string` / `cv::Mat`**
+曾新增 `pcp_c_api`（VS2022 编），用纯 C 接口隔离工具集差异；`mock_algo_service` 只调 C API。
 
-`mock_algo_service`（可仍为 VS2019）仅链接 `pcp_c_api.lib`，通过 `algo_processor_create.cpp` 调用上述 C API。
+### 3.2（历史）部署强制 VC143 CRT
 
-构建：父工程 POST/自定义步骤使用生成器 `Visual Studio 17 2022` 单独编出 `pcp_c_api.dll`。
+曾在 `copy_release_dlls.cmake` 中 `-DFORCE_VC143=1`，避免旁路 VC142 CRT 与 14.44 引擎冲突。  
+**现行**：与 v142 引擎一致，按当前工具集部署 CRT，不再强制 VC143。
 
-### 3.2 部署强制覆盖 VC143 CRT
-
-`tools/mock_algo_service/cmake/copy_release_dlls.cmake` 末尾调用：
-
-```text
-deploy_msvc_runtime.cmake -DFORCE_VC143=1
-```
-
-将 VS2022 红包中的 CRT **覆盖**到 `mock_algo_service` 输出目录，避免旁路残留 VC142。
-
-### 3.3 客户机部署清单
-
-替换整份 `alg_program`（或至少保证下列文件为新构建产物）：
+### 3.3 现行部署清单
 
 | 文件 | 说明 |
 |------|------|
-| `mock_algo_service.exe` | 走 C API 的新算法进程 |
-| `pcp_c_api.dll` | **新增，必须** |
-| `PointCloudProcessor.dll` | 仍为现有 14.44 引擎 |
-| `msvcp140.dll` 等 CRT | 须为 **VC143**，勿混用旧旁路 CRT |
-| 其余 OpenCV/PCL/VTK 等依赖 | 与现有 Release 部署一致 |
+| `mock_algo_service.exe` | 直接链接 PCP（v142） |
+| `PointCloudProcessor.dll` | **须为 v142 / linker 14.29** |
+| 第三方 OpenCV/PCL/VTK 等 | 与 ReconDLL third_party 一致 |
 | `config.json` | 点云算法配置 |
-
-成功日志应出现类似：
-
-```text
-已加载算法引擎: ...\config.json
-深度图 ... 
-process 开始 ...
-```
-
-而不是构造期「原生异常/访问冲突」。
-
-本地构建产物目录示例：
-
-```text
-visual_system/build/tools/mock_algo_service/Release/
-```
+| ~~`pcp_c_api.dll`~~ | **已删除，客户包中应移除** |
 
 ---
 
@@ -163,20 +145,20 @@ visual_system/build/tools/mock_algo_service/Release/
 
 ---
 
-## 6. 相关代码与脚本
+## 6. 相关代码（现行）
 
 | 路径 | 作用 |
 |------|------|
-| `tools/mock_algo_service/pcp_c_api/` | C ABI 桥接源码与独立 CMake |
-| `tools/mock_algo_service/algo_processor_create.*` | 算法进程侧 C API 封装 |
-| `tools/mock_algo_service/CMakeLists.txt` | 触发 VS2022 编桥接并部署 |
-| `tools/mock_algo_service/cmake/copy_release_dlls.cmake` | 第三方 DLL + 强制 VC143 |
-| `cmake/deploy_msvc_runtime.cmake` | CRT 部署（支持 `FORCE_VC143`） |
+| `tools/mock_algo_service/algo_processor_create.*` | 直接构造/调用 `PointCloudProcessor` |
+| `tools/mock_algo_service/PointCloudProcessor_api.h` | 精简头（避免 pcl_visualizer/VTK 静态初始化） |
+| `tools/mock_algo_service/CMakeLists.txt` | 直接链接 PCP + 第三方 |
+| `tools/mock_algo_service/cmake/copy_release_dlls.cmake` | 第三方 DLL + 常规 MSVC CRT |
+| `cmake/deploy_msvc_runtime.cmake` | CRT 部署 |
 
 ---
 
 ## 7. 结论
 
-- **原因**：`PointCloudProcessor`（14.44）与算法进程（14.29）工具集不一致，跨 DLL 使用 C++ ABI；客户包旁路 VC142 CRT 使问题必现。  
-- **已采用方案**：`pcp_c_api`（v143）纯 C 桥接 + 部署强制 VC143 CRT。  
-- **中长期**：算法 DLL 与调用进程同工具集重编；安装 VC++ 运行库仅作缺 DLL 保底，不能替代本次修复。
+- **历史原因**：引擎 14.44 与算法进程 14.29 工具集不一致。  
+- **临时补丁（已移除）**：C ABI 桥 + 强制 VC143。  
+- **现行**：引擎与进程均为 **v142**，直接调用；部署时保证 `PointCloudProcessor.dll` 为 14.29，并清除旧包中的 `pcp_c_api.dll`。

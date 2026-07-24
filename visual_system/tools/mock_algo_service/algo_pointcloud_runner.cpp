@@ -257,7 +257,7 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
 
   const auto cfg_path = ResolvePointCloudConfig(config, exe_dir);
   PointCloudProcessorPtr owned;
-  PCP_Handle* proc = nullptr;
+  PointCloudProcessor* proc = nullptr;
 
   try {
     if (slot != nullptr) {
