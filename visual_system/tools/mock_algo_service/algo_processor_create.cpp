@@ -1,6 +1,6 @@
 /**
  * @file algo_processor_create.cpp
- * @brief 唯一包含 PointCloudProcessor 精简头的翻译单元；以 /EHa 捕获引擎 SEH。
+ * @brief 唯一包含 PointCloudProcessor.h 的翻译单元；以 /EHa 捕获引擎 SEH。
  */
 #include "algo_processor_create.h"
 
@@ -10,7 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "PointCloudProcessor_api.h"
+// 直接使用算法库官方头，避免精简 shim 与 DLL 成员布局漂移（如 m_DrawImage）。
+#include "PointCloudProcessor.h"
 
 void PointCloudProcessorDeleter::operator()(PointCloudProcessor* p) const {
   delete p;
