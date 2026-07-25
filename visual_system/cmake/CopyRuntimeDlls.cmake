@@ -36,13 +36,26 @@ function(vs_copy_runtime_dlls target)
     endif()
   endif()
 
+  # Stub 读 sim_test.tiff 链接了 OpenCV 4.12；部署到 VisualSystem.exe 旁
+  set(_opencv_bin "")
+  foreach(_cand IN ITEMS
+      "${VS_RECON_THIRD_PARTY_ROOT}/bin"
+      "G:/ReconDLL/third_party/bin")
+    if(EXISTS "${_cand}/opencv_core4.dll")
+      set(_opencv_bin "${_cand}")
+      break()
+    endif()
+  endforeach()
+
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
       "-DEXE=$<TARGET_FILE:${target}>"
       "-DQT_BIN=${_qt_bin}"
       "-DRVC_RUNTIME=${_rvc_runtime}"
       "-DPLCTAG_DLL=${_plctag}"
+      "-DOPENCV_BIN=${_opencv_bin}"
+      "-DWEBP_RELEASE_DIR=G:/ReconDLL/Decode/Release"
       -P "${VS_DEPLOY_EXE_RUNTIME_SCRIPT}"
-    COMMENT "Deploy runtime DLLs beside ${target} (Qt/RVC/MSVC)"
+    COMMENT "Deploy runtime DLLs beside ${target} (Qt/RVC/OpenCV/MSVC)"
     VERBATIM)
 endfunction()

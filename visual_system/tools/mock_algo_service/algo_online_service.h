@@ -16,11 +16,10 @@ int RunOnlineService(const AlgoConfig& config);
 
 /**
  * 单通道服务循环（R05/R09 各一线程、各绑一块 SHM）。
- * processor_slot：每通道独立引擎；algo_mu：串行化 DLL 调用（避免并发 process）。
+ * processor_slot：每通道独立引擎（可并行 process，压测时不加全局锁）。
  * @return 异常退出码；正常常驻不返回。
  */
 int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannelId channel,
-                               PointCloudProcessorSlot* processor_slot = nullptr,
-                               void* algo_mu = nullptr);
+                               PointCloudProcessorSlot* processor_slot = nullptr);
 
 }  // namespace algo

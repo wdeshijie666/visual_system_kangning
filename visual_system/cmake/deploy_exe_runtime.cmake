@@ -45,7 +45,44 @@ if(PLCTAG_DLL AND EXISTS "${PLCTAG_DLL}")
   message(STATUS "Copied plctag.dll")
 endif()
 
-# 4) MSVC 运行库
+# 4) OpenCV 4.12（Stub 固定读 sim_test.tiff；仅 Release *4，跳过 *4d / *480）
+if(OPENCV_BIN AND EXISTS "${OPENCV_BIN}")
+  set(_cv_mods opencv_core4.dll opencv_imgproc4.dll opencv_imgcodecs4.dll)
+  set(_cv_n 0)
+  foreach(_name IN LISTS _cv_mods)
+    if(EXISTS "${OPENCV_BIN}/${_name}")
+      execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OPENCV_BIN}/${_name}" "${DST}/${_name}")
+      math(EXPR _cv_n "${_cv_n}+1")
+    endif()
+  endforeach()
+  # imgcodecs 常用解码依赖（注意 OpenCV4 链的是 z.dll，不是 zlib.dll）
+  set(_codec_deps
+    z.dll zlib.dll liblzma.dll libpng16.dll jpeg62.dll turbojpeg.dll tiff.dll libtiff.dll
+    libwebp.dll libwebpdecoder.dll libwebpdemux.dll libwebpmux.dll libsharpyuv.dll)
+  set(_codec_n 0)
+  foreach(_name IN LISTS _codec_deps)
+    if(EXISTS "${OPENCV_BIN}/${_name}")
+      execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OPENCV_BIN}/${_name}" "${DST}/${_name}")
+      math(EXPR _codec_n "${_codec_n}+1")
+    endif()
+  endforeach()
+  # Release libwebp 覆盖（third_party/bin 可能是 Debug CRT）
+  if(WEBP_RELEASE_DIR AND EXISTS "${WEBP_RELEASE_DIR}/libwebp.dll")
+    foreach(_name IN ITEMS
+        libwebp.dll libwebpdecoder.dll libwebpdemux.dll libwebpmux.dll libsharpyuv.dll)
+      if(EXISTS "${WEBP_RELEASE_DIR}/${_name}")
+        execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${WEBP_RELEASE_DIR}/${_name}" "${DST}/${_name}")
+      endif()
+    endforeach()
+    message(STATUS "Overlaid Release libwebp* from ${WEBP_RELEASE_DIR}")
+  endif()
+  message(STATUS "Copied OpenCV ${_cv_n} + codec ${_codec_n} DLL(s) from ${OPENCV_BIN}")
+endif()
+
+# 5) MSVC 运行库
 set(_msvc_script "${CMAKE_CURRENT_LIST_DIR}/deploy_msvc_runtime.cmake")
 if(EXISTS "${_msvc_script}")
   execute_process(COMMAND ${CMAKE_COMMAND} -DDST=${DST} -P "${_msvc_script}")

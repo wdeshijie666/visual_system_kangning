@@ -179,7 +179,11 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   }
 
   QJsonObject pipeline;
-  pipeline.insert(QStringLiteral("enabled"), simulation_mode_);
+  // runMode=simulation 只驱动虚拟相机/Memory PLC；有点云算法时禁用通路假结果，便于压测真实 process。
+  const bool use_pc_algo = root.contains(QStringLiteral("usePointCloudAlgo"))
+                               ? root.value(QStringLiteral("usePointCloudAlgo")).toBool(true)
+                               : true;
+  pipeline.insert(QStringLiteral("enabled"), simulation_mode_ && !use_pc_algo);
   pipeline.insert(QStringLiteral("imageWidth"), simulation_image_width_);
   pipeline.insert(QStringLiteral("imageHeight"), simulation_image_height_);
   QJsonObject algo_result;
@@ -236,7 +240,9 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
   file.close();
 
-  LogEvent(simulation_mode_ ? tr("算法配置已同步为通路仿真模式") : tr("算法配置已同步为实机模式"));
+  LogEvent((simulation_mode_ && !use_pc_algo)
+               ? tr("算法配置已同步为通路仿真模式")
+               : tr("算法配置已同步为实机算法模式（仿真相机/PLC 时可并行压测 process）"));
   return true;
 }
 

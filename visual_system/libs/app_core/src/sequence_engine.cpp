@@ -783,8 +783,17 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
   ev.station = station;
   ev.logs = algo_resp.logs;
   ev.session_dir = QString::fromStdString(record_ctx.output_dir);
-  // 优先显示算法回传可视化图；否则回退采图原始灰度（transferGray=false 时亦如此）
-  FillPreviewFromAlgo(&ev, algo_resp);
+  // 优先显示算法回传可视化图；无合格检出时强制本周期采图灰度，避免沿用上一周期标注残图。
+  bool any_ok = false;
+  for (const auto& L : algo_resp.logs) {
+    if (L.status == InspectStatus::kOk) {
+      any_ok = true;
+      break;
+    }
+  }
+  if (any_ok) {
+    FillPreviewFromAlgo(&ev, algo_resp);
+  }
   if (ev.image_bytes.isEmpty()) {
     for (const auto& capture : req.captures) {
       if (capture.ok && capture.gray) {

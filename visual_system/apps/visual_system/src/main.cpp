@@ -222,6 +222,8 @@ int main(int argc, char* argv[]) {
   stub_options.image_width = settings.simulation.image_width;
   stub_options.image_height = settings.simulation.image_height;
   stub_options.solid_black = true;
+  // 仅 Stub 生效：每次 Capture 读 VisualSystem.exe 旁 sim_test.tiff；真机 RvcCamera 忽略
+  stub_options.sim_depth_tiff = "sim_test.tiff";
 
   // --- 阶段 0.6：先拉起算法进程并等通道就绪，再连相机 ---
   std::unique_ptr<AlgoProcessManager> algo_process_manager;

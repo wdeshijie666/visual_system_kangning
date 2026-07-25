@@ -85,7 +85,7 @@ std::size_t ResolveBlobArenaSize(const visual::shm::ShmHeader* header, std::size
 }  // namespace
 
 int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannelId channel,
-                               PointCloudProcessorSlot* processor_slot, void* algo_mu_ptr) {
+                               PointCloudProcessorSlot* processor_slot) {
 #ifdef _WIN32
   if (channel == visual::shm::ShmChannelId::kR09 && !config.channel_r09.enabled) {
     return 0;
@@ -171,10 +171,8 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
   }
 
 #if defined(VS_HAS_POINTCLOUD_ALGO)
-  auto* algo_mu = static_cast<std::mutex*>(algo_mu_ptr);
 #else
   (void)processor_slot;
-  (void)algo_mu_ptr;
 #endif
 
   while (true) {
@@ -256,11 +254,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
         if (config.use_point_cloud_algo) {
           bool algo_ok = false;
           try {
-            // 先拿全局算法锁再打「开始计算」，避免 R05 仍在 process 时 R09 日志造成“并发进入”假象。
-            std::unique_lock<std::mutex> lock;
-            if (algo_mu != nullptr) {
-              lock = std::unique_lock<std::mutex>(*algo_mu);
-            }
+            // 暂不加全局锁：R05/R09 可并行 process（各通道独立引擎实例）。
             AlgoInfo(std::string("[") + tag + "] 开始计算");
             algo_ok = RunPointCloudFromShm(header, blob_arena, blob_arena_size, config, exe_dir,
                                            header->logs, visual::shm::kLogCount, &algo_error,
@@ -333,7 +327,6 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
   (void)config;
   (void)channel;
   (void)processor_slot;
-  (void)algo_mu_ptr;
   AlgoError("在线模式仅支持 Windows");
   return 1;
 #endif
@@ -350,23 +343,22 @@ int RunOnlineService(const AlgoConfig& config) {
   }
 
 #if defined(VS_HAS_POINTCLOUD_ALGO)
-  std::mutex algo_mu;
-  // R05/R09 各一实例；mutex 仅串行化 process，避免并发进入 DLL。
+  // R05/R09 各一实例；暂不串行化 process，便于双工位并行压测。
   PointCloudProcessorSlot slot_r05;
   PointCloudProcessorSlot slot_r09;
 
-  std::thread t_r05([&config, &slot_r05, &algo_mu]() {
-    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR05, &slot_r05, &algo_mu);
+  std::thread t_r05([&config, &slot_r05]() {
+    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR05, &slot_r05);
   });
-  std::thread t_r09([&config, &slot_r09, &algo_mu]() {
-    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR09, &slot_r09, &algo_mu);
+  std::thread t_r09([&config, &slot_r09]() {
+    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR09, &slot_r09);
   });
 #else
   std::thread t_r05([&config]() {
-    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR05, nullptr, nullptr);
+    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR05, nullptr);
   });
   std::thread t_r09([&config]() {
-    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR09, nullptr, nullptr);
+    RunOnlineServiceForChannel(config, visual::shm::ShmChannelId::kR09, nullptr);
   });
 #endif
   t_r05.join();

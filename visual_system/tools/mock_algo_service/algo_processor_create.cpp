@@ -112,7 +112,7 @@ int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, cv::Mat* draw_imag
 
     const int n = p->process(depth, draw_ref, top_n);
 
-    // 新 Mat 接住可视化图后按行拷出，不把引擎内部 Mat 直接交给调用方持有。
+    // 新 Mat 接住可视化图后按行拷出；getImage 为空时保留入参底图，供写回本周期灰度。
     if (n >= 0 && draw_image != nullptr) {
       cv::Mat image = p->getImage();
       if (!image.empty()) {
@@ -125,8 +125,6 @@ int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, cv::Mat* draw_imag
                         static_cast<std::size_t>(image.cols) * image.elemSize());
           }
         }
-      } else {
-        draw_image->release();
       }
     }
     return n;

@@ -29,6 +29,11 @@
 #include <Windows.h>
 #endif
 
+#ifdef VISUAL_STUB_HAS_OPENCV
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#endif
+
 namespace fs = std::filesystem;
 
 #ifdef VISUAL_HAS_RVC_SDK
@@ -439,6 +444,79 @@ std::shared_ptr<PointCloudBuffer> MakeStubPointCloudBuffer() {
   return pc;
 }
 
+/** VisualSystem.exe 所在目录（仿真 TIFF 固定相对此目录）。 */
+fs::path ResolveHostExeDir() {
+#ifdef _WIN32
+  char buf[MAX_PATH] = {};
+  const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n > 0 && n < MAX_PATH) {
+    return fs::path(buf).parent_path();
+  }
+#endif
+  return fs::current_path();
+}
+
+/**
+ * 仿真：从 TIFF 加载深度。
+ * SHM 浮点深度约定为「米」（后续 ConvertShmDepthMetersToMm 会 ×1000）；
+ * 若 TIFF 数值像毫米（max>20）则先换成米再写入。
+ */
+bool LoadStubDepthFromTiff(const fs::path& tiff_path, std::shared_ptr<DepthImageBuffer>* out,
+                           std::string* error) {
+  if (out == nullptr) {
+    return false;
+  }
+#ifndef VISUAL_STUB_HAS_OPENCV
+  if (error) {
+    *error = "未链接 OpenCV，无法读取 sim_test.tiff";
+  }
+  return false;
+#else
+  if (!fs::exists(tiff_path)) {
+    if (error) {
+      *error = "仿真深度文件不存在: " + tiff_path.string();
+    }
+    return false;
+  }
+  cv::Mat img = cv::imread(tiff_path.string(), cv::IMREAD_UNCHANGED);
+  if (img.empty() || img.channels() != 1) {
+    if (error) {
+      *error = "仿真深度 TIFF 无效（需单通道）: " + tiff_path.string();
+    }
+    return false;
+  }
+  cv::Mat f32;
+  if (img.type() == CV_32FC1) {
+    f32 = img;
+  } else if (img.type() == CV_64FC1) {
+    img.convertTo(f32, CV_32FC1);
+  } else if (img.type() == CV_16UC1) {
+    img.convertTo(f32, CV_32FC1);
+  } else {
+    img.convertTo(f32, CV_32FC1);
+  }
+  double min_v = 0.0;
+  double max_v = 0.0;
+  cv::minMaxLoc(f32, &min_v, &max_v);
+  // 毫米量级 → 米（与在线相机浮点深度一致）
+  if (max_v > 20.0) {
+    f32 *= (1.f / 1000.f);
+  }
+  if (!f32.isContinuous()) {
+    f32 = f32.clone();
+  }
+  auto depth = std::make_shared<DepthImageBuffer>();
+  depth->width = static_cast<std::uint32_t>(f32.cols);
+  depth->height = static_cast<std::uint32_t>(f32.rows);
+  depth->format = DepthPixelFormat::kFloat32Mm;
+  const std::size_t nbytes = f32.total() * f32.elemSize();
+  depth->data.resize(nbytes);
+  std::memcpy(depth->data.data(), f32.data, nbytes);
+  *out = std::move(depth);
+  return true;
+#endif
+}
+
 class StubRvcCamera final : public ICamera3D {
  public:
   StubRvcCamera(std::string id, std::string serial, StubCameraOptions options)
@@ -477,26 +555,46 @@ class StubRvcCamera final : public ICamera3D {
     return info;
   }
 
-  /** 仿真：按 opts 生成深度/灰度/点云。 */
+  /** 仿真：优先读 exe 旁 sim_test.tiff；失败则报错（不静默用假深度，避免压测失真）。 */
   CaptureBundle Capture(const CaptureCopyOptions& opts = {}) override {
     std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     const auto t0 = std::chrono::steady_clock::now();
     CaptureBundle bundle;
     bundle.camera_serial = serial_;
+    bundle.ok = true;
+
+    std::shared_ptr<DepthImageBuffer> depth_from_tiff;
+    if (opts.copy_depth && !options_.sim_depth_tiff.empty()) {
+      const fs::path tiff = ResolveHostExeDir() / options_.sim_depth_tiff;
+      std::string load_err;
+      if (!LoadStubDepthFromTiff(tiff, &depth_from_tiff, &load_err)) {
+        bundle.ok = false;
+        bundle.error_message = load_err.empty() ? "仿真深度 TIFF 读取失败" : load_err;
+        LogToStderr(LogSeverity::kWarning, "[stub] " + bundle.error_message);
+      }
+    }
+
+    int w = options_.image_width;
+    int h = options_.image_height;
+    if (depth_from_tiff) {
+      w = static_cast<int>(depth_from_tiff->width);
+      h = static_cast<int>(depth_from_tiff->height);
+    }
+
     if (opts.copy_depth) {
-      bundle.depth =
-          MakeStubDepthBuffer(options_.image_width, options_.image_height, options_.solid_black);
+      if (depth_from_tiff) {
+        bundle.depth = depth_from_tiff;
+      } else if (bundle.ok) {
+        bundle.depth = MakeStubDepthBuffer(w, h, options_.solid_black);
+      }
     }
-    if (opts.copy_gray) {
-      bundle.gray =
-          MakeStubGrayBuffer(options_.image_width, options_.image_height, options_.solid_black);
+    if (opts.copy_gray && bundle.ok) {
+      bundle.gray = MakeStubGrayBuffer(w, h, options_.solid_black);
     }
-    if (opts.copy_pointcloud) {
+    if (opts.copy_pointcloud && bundle.ok) {
       bundle.pointcloud = MakeStubPointCloudBuffer();
     }
-    // 未拷深度时仍视为采图成功（实机落盘可走 SDK；仿真落盘需 depth）
-    bundle.ok = true;
-    if (opts.copy_depth && !bundle.depth) {
+    if (opts.copy_depth && bundle.ok && !bundle.depth) {
       bundle.ok = false;
       bundle.error_message = "stub depth alloc failed";
     }

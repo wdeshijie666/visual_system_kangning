@@ -300,6 +300,32 @@ visual::ImagePixelFormat CvTypeToImageFormat(int cv_type) {
   }
 }
 
+/** transferGray：把可视化图或本周期灰度写回 SHM，避免视口沿用上一周期残留。 */
+bool WritePreviewImageToShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,
+                            std::size_t blob_arena_size, int cam_idx, const cv::Mat& image) {
+  if (header == nullptr || blob_arena == nullptr || image.empty()) {
+    return false;
+  }
+  if (!visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray)) {
+    return false;
+  }
+  cv::Mat cont = image.isContinuous() ? image : image.clone();
+  const visual::ImagePixelFormat fmt = CvTypeToImageFormat(cont.type());
+  if (fmt == visual::ImagePixelFormat::kNone) {
+    AlgoError("可视化图像格式不支持 type=" + std::to_string(cont.type()));
+    return false;
+  }
+  std::string write_err;
+  if (!visual::shm::WriteResultImageToShm(
+          header, blob_arena, blob_arena_size, cam_idx,
+          static_cast<std::uint32_t>(cont.cols), static_cast<std::uint32_t>(cont.rows), fmt,
+          cont.data, cont.total() * cont.elemSize(), &write_err)) {
+    AlgoError("写回可视化图失败: " + write_err);
+    return false;
+  }
+  return true;
+}
+
 std::filesystem::path ResolvePointCloudConfig(const AlgoConfig& config,
                                               const std::filesystem::path& exe_dir) {
   if (!config.point_cloud_config.empty()) {
@@ -358,8 +384,22 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
   try {
     SanitizeDepthMm(&depth);
     const std::size_t positive_depth = CountPositiveDepthMm(depth);
+
+    cv::Mat input_gray;
+    int gray_cam_index = -1;
+    const bool want_gray =
+        config.transfer_gray ||
+        visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray);
+    if (want_gray) {
+      gray_cam_index = PickFirstGray(header, blob_arena, &input_gray);
+    }
+
     if (positive_depth == 0) {
-      // 空点云：不创建、不销毁该通道引擎。
+      // 空点云：不创建引擎；仍写回本周期灰度，避免视口停在上一帧标注图。
+      if (want_gray && !input_gray.empty()) {
+        WritePreviewImageToShm(header, blob_arena, blob_arena_size,
+                               gray_cam_index >= 0 ? gray_cam_index : 0, input_gray);
+      }
       AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + "（空点云跳过 process）");
       return true;
     }
@@ -416,15 +456,11 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
 
     const int top_n = config.point_cloud_top_n > 0 ? config.point_cloud_top_n : 5;
-    cv::Mat draw_image;
-    int gray_cam_index = -1;
-    if (config.transfer_gray ||
-        visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray)) {
-      gray_cam_index = PickFirstGray(header, blob_arena, &draw_image);
-    }
+    cv::Mat draw_image = input_gray;
     if (draw_image.empty()) {
       draw_image = cv::Mat(depth.rows, depth.cols, CV_8UC1, cv::Scalar(0));
     }
+    const cv::Mat input_gray_keep = draw_image.clone();
 
     // 样例契约：process(depth, gray) → getImage；不在此前调用 loadDepthMap。
     AlgoInfo("process 开始 top_n=" + std::to_string(top_n));
@@ -445,30 +481,6 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     AlgoInfo("process 结束 返回=" + std::to_string(n) + " 点云点数=" +
              std::to_string(point_count));
 
-    if (n >= 0 &&
-        visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray)) {
-      cv::Mat vis = draw_image;
-      if (vis.empty()) {
-        vis = PCP_GetImage(proc);
-      }
-      if (!vis.empty()) {
-        if (!vis.isContinuous()) {
-          vis = vis.clone();
-        }
-        const visual::ImagePixelFormat fmt = CvTypeToImageFormat(vis.type());
-        const int cam_idx = gray_cam_index >= 0 ? gray_cam_index : 0;
-        std::string write_err;
-        if (fmt == visual::ImagePixelFormat::kNone) {
-          AlgoError("可视化图像格式不支持 type=" + std::to_string(vis.type()));
-        } else if (!visual::shm::WriteResultImageToShm(
-                       header, blob_arena, blob_arena_size, cam_idx,
-                       static_cast<std::uint32_t>(vis.cols), static_cast<std::uint32_t>(vis.rows),
-                       fmt, vis.data, vis.total() * vis.elemSize(), &write_err)) {
-          AlgoError("写回可视化图失败: " + write_err);
-        }
-      }
-    }
-
     std::size_t fit_n = 0;
     if (n > 0 && point_count > 0) {
       const auto fits = PCP_GetFitResults(proc);
@@ -482,6 +494,23 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
         ++ok_n;
       }
     }
+
+    // 有合格检出写标注图；无检出强制写本周期灰度，防止 getImage 残留上一周期画面。
+    if (want_gray) {
+      cv::Mat vis;
+      if (ok_n > 0) {
+        vis = draw_image;
+        if (vis.empty()) {
+          vis = PCP_GetImage(proc);
+        }
+      }
+      if (vis.empty()) {
+        vis = input_gray_keep;
+      }
+      WritePreviewImageToShm(header, blob_arena, blob_arena_size,
+                             gray_cam_index >= 0 ? gray_cam_index : 0, vis);
+    }
+
     AlgoInfo("计算完成 检出=" + std::to_string(ok_n) + "/" + std::to_string(log_count) +
              " 簇数=" + std::to_string(PCP_GetClusterCount(proc)));
 
