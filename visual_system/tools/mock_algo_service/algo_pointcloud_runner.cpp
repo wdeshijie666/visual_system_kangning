@@ -6,10 +6,19 @@
  */
 #include "algo_pointcloud_runner.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -72,6 +81,36 @@ void ConvertShmDepthMetersToMm(cv::Mat* depth) {
   } else if (depth->type() == CV_16UC1) {
     depth->convertTo(*depth, CV_32FC1);
   }
+}
+
+/** 非法深度（NaN/Inf/负值）置 0。 */
+void SanitizeDepthMm(cv::Mat* depth) {
+  if (depth == nullptr || depth->empty() || depth->type() != CV_32FC1) {
+    return;
+  }
+  float* p = depth->ptr<float>();
+  const std::size_t n = depth->total();
+  for (std::size_t i = 0; i < n; ++i) {
+    if (!std::isfinite(p[i]) || p[i] < 0.f) {
+      p[i] = 0.f;
+    }
+  }
+}
+
+/** 正深度像素数：空点云直接跳过，不创建/触碰引擎。 */
+std::size_t CountPositiveDepthMm(const cv::Mat& depth) {
+  if (depth.empty() || depth.type() != CV_32FC1) {
+    return 0;
+  }
+  const float* p = depth.ptr<float>();
+  const std::size_t n = depth.total();
+  std::size_t positive = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (std::isfinite(p[i]) && p[i] > 0.f) {
+      ++positive;
+    }
+  }
+  return positive;
 }
 
 void FillAllNg(visual::shm::ShmLogResult* logs, std::size_t count) {
@@ -204,6 +243,63 @@ bool PickFirstDepth(const visual::shm::ShmHeader* header, const std::uint8_t* bl
   return false;
 }
 
+/**
+ * 从 SHM 解 Mono8 灰度 → CV_8UC1（与落盘 P5 .pgm 像素布局一致：行优先、无 padding）。
+ * 返回相机下标，失败 -1。
+ */
+int PickFirstGray(const visual::shm::ShmHeader* header, const std::uint8_t* blob_arena,
+                  cv::Mat* gray) {
+  if (header == nullptr || blob_arena == nullptr || gray == nullptr) {
+    return -1;
+  }
+  for (std::int32_t i = 0; i < header->camera_count; ++i) {
+    const auto& cam = header->cameras[i];
+    if (cam.image.blob_size == 0 || cam.image.width == 0 || cam.image.height == 0) {
+      continue;
+    }
+    // 请求侧约定仅传 Mono8；与 WriteMono8GrayPgm / algo_shm_codec 一致
+    if (cam.image.format != visual::ImagePixelFormat::kMono8 || cam.image.bytes_per_pixel != 1) {
+      continue;
+    }
+    const int w = static_cast<int>(cam.image.width);
+    const int h = static_cast<int>(cam.image.height);
+    const std::uint32_t stride = cam.image.row_stride_bytes != 0
+                                     ? cam.image.row_stride_bytes
+                                     : static_cast<std::uint32_t>(w);
+    const std::size_t min_bytes =
+        static_cast<std::size_t>(h - 1) * stride + static_cast<std::size_t>(w);
+    if (cam.image.blob_size < min_bytes) {
+      continue;
+    }
+    const auto* blob = blob_arena + cam.image.blob_offset;
+    if (stride == static_cast<std::uint32_t>(w)) {
+      // 连续缓冲：与 cv::imread(P5) / 落盘 gray.pgm 原始区相同
+      *gray = cv::Mat(h, w, CV_8UC1, const_cast<std::uint8_t*>(blob)).clone();
+    } else {
+      *gray = cv::Mat(h, w, CV_8UC1);
+      for (int r = 0; r < h; ++r) {
+        std::memcpy(gray->ptr(r), blob + static_cast<std::size_t>(r) * stride,
+                    static_cast<std::size_t>(w));
+      }
+    }
+    return i;
+  }
+  return -1;
+}
+
+visual::ImagePixelFormat CvTypeToImageFormat(int cv_type) {
+  switch (cv_type) {
+    case CV_8UC1:
+      return visual::ImagePixelFormat::kMono8;
+    case CV_8UC3:
+      return visual::ImagePixelFormat::kBgr8;
+    case CV_8UC4:
+      return visual::ImagePixelFormat::kBgra8;
+    default:
+      return visual::ImagePixelFormat::kNone;
+  }
+}
+
 std::filesystem::path ResolvePointCloudConfig(const AlgoConfig& config,
                                               const std::filesystem::path& exe_dir) {
   if (!config.point_cloud_config.empty()) {
@@ -218,7 +314,7 @@ std::filesystem::path ResolvePointCloudConfig(const AlgoConfig& config,
 
 }  // namespace
 
-bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8_t* blob_arena,
+bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,
                           std::size_t blob_arena_size, const AlgoConfig& config,
                           const std::filesystem::path& exe_dir, visual::shm::ShmLogResult* logs,
                           std::size_t log_count, std::string* error,
@@ -260,35 +356,46 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
   PointCloudProcessor* proc = nullptr;
 
   try {
+    SanitizeDepthMm(&depth);
+    const std::size_t positive_depth = CountPositiveDepthMm(depth);
+    if (positive_depth == 0) {
+      // 空点云：不创建、不销毁该通道引擎。
+      AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + "（空点云跳过 process）");
+      return true;
+    }
+
+    AlgoInfo("深度图 " + std::to_string(depth.cols) + "x" + std::to_string(depth.rows) +
+             " 有效像素=" + std::to_string(positive_depth));
+
     if (slot != nullptr) {
-      const bool size_changed =
-          slot->last_depth_w > 0 &&
-          (slot->last_depth_w != depth.cols || slot->last_depth_h != depth.rows);
-      if (slot->processor == nullptr || size_changed) {
+      if (slot->processor != nullptr &&
+          (slot->last_depth_w != depth.cols || slot->last_depth_h != depth.rows)) {
+        // 运行中不析构旧实例；分辨率变化时请重启算法进程。
+        if (error) {
+          *error = "深度分辨率变化，请重启算法进程";
+        }
+        return false;
+      }
+      if (slot->processor == nullptr) {
         if (!std::filesystem::exists(cfg_path)) {
           if (error) {
             *error = "算法配置文件缺失: " + cfg_path.string();
           }
           return false;
         }
-        if (size_changed) {
-          std::ostringstream oss;
-          oss << "深度分辨率变化 " << slot->last_depth_w << "x" << slot->last_depth_h << " -> "
-              << depth.cols << "x" << depth.rows << "，重建算法引擎";
-          AlgoInfo(oss.str());
-        }
         std::string create_error;
         slot->processor = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
         if (!slot->processor) {
           if (error) {
-            *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
+            *error =
+                create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
           }
           return false;
         }
+        slot->last_depth_w = depth.cols;
+        slot->last_depth_h = depth.rows;
         AlgoInfo("已加载算法引擎: " + cfg_path.string());
       }
-      slot->last_depth_w = depth.cols;
-      slot->last_depth_h = depth.rows;
       proc = slot->processor.get();
     } else {
       if (!std::filesystem::exists(cfg_path)) {
@@ -309,45 +416,61 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
     }
 
     const int top_n = config.point_cloud_top_n > 0 ? config.point_cloud_top_n : 5;
-
-    {
-      std::ostringstream oss;
-      oss << "深度图 " << depth.cols << "x" << depth.rows << " type=" << depth.type();
-      AlgoInfo(oss.str());
+    cv::Mat draw_image;
+    int gray_cam_index = -1;
+    if (config.transfer_gray ||
+        visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray)) {
+      gray_cam_index = PickFirstGray(header, blob_arena, &draw_image);
+    }
+    if (draw_image.empty()) {
+      draw_image = cv::Mat(depth.rows, depth.cols, CV_8UC1, cv::Scalar(0));
     }
 
-    if (!PCP_LoadDepthMap(proc, depth)) {
-      if (error) {
-        *error = "深度转点云失败（或引擎原生异常）";
-      }
-      return false;
-    }
-    const std::size_t point_count = PCP_GetPointCount(proc);
-    AlgoInfo("点云点数=" + std::to_string(point_count));
-
-    if (point_count == 0) {
-      AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + " 簇数=0（空点云跳过）");
-      return true;
-    }
-
+    // 样例契约：process(depth, gray) → getImage；不在此前调用 loadDepthMap。
     AlgoInfo("process 开始 top_n=" + std::to_string(top_n));
-    const int n = PCP_Process(proc, depth, top_n);
+    const int n = PCP_Process(proc, depth, &draw_image, top_n);
     if (n == -999) {
-      AlgoError("PointCloudProcessor::process 发生原生异常（已捕获，进程继续）");
+      AlgoError("PointCloudProcessor::process 发生原生异常；SEH 后禁止 delete 引擎（防堆损坏），进程退出由视觉重启");
       if (error) {
         *error = "算法引擎原生异常，请检查深度数据与 config.json";
       }
-      if (slot != nullptr) {
-        slot->processor.reset();
-        slot->last_depth_w = 0;
-        slot->last_depth_h = 0;
-      }
-      return false;
+#ifdef _WIN32
+      ExitProcess(1);
+#else
+      std::_Exit(1);
+#endif
     }
-    AlgoInfo("process 结束 返回=" + std::to_string(n));
+
+    const std::size_t point_count = PCP_GetPointCount(proc);
+    AlgoInfo("process 结束 返回=" + std::to_string(n) + " 点云点数=" +
+             std::to_string(point_count));
+
+    if (n >= 0 &&
+        visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray)) {
+      cv::Mat vis = draw_image;
+      if (vis.empty()) {
+        vis = PCP_GetImage(proc);
+      }
+      if (!vis.empty()) {
+        if (!vis.isContinuous()) {
+          vis = vis.clone();
+        }
+        const visual::ImagePixelFormat fmt = CvTypeToImageFormat(vis.type());
+        const int cam_idx = gray_cam_index >= 0 ? gray_cam_index : 0;
+        std::string write_err;
+        if (fmt == visual::ImagePixelFormat::kNone) {
+          AlgoError("可视化图像格式不支持 type=" + std::to_string(vis.type()));
+        } else if (!visual::shm::WriteResultImageToShm(
+                       header, blob_arena, blob_arena_size, cam_idx,
+                       static_cast<std::uint32_t>(vis.cols), static_cast<std::uint32_t>(vis.rows),
+                       fmt, vis.data, vis.total() * vis.elemSize(), &write_err)) {
+          AlgoError("写回可视化图失败: " + write_err);
+        }
+      }
+    }
 
     std::size_t fit_n = 0;
-    if (n > 0 && PCP_GetPointCount(proc) > 0) {
+    if (n > 0 && point_count > 0) {
       const auto fits = PCP_GetFitResults(proc);
       fit_n = fits.size();
       MapFitResultsToLogs(fits, logs, log_count);
@@ -359,12 +482,8 @@ bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8
         ++ok_n;
       }
     }
-
-    {
-      std::ostringstream oss;
-      oss << "计算完成 检出=" << ok_n << "/" << log_count << " 簇数=" << PCP_GetClusterCount(proc);
-      AlgoInfo(oss.str());
-    }
+    AlgoInfo("计算完成 检出=" + std::to_string(ok_n) + "/" + std::to_string(log_count) +
+             " 簇数=" + std::to_string(PCP_GetClusterCount(proc)));
 
     if (GetAlgoLogLevel() >= LogLevel::kDebug) {
       for (std::size_t i = 0; i < log_count; ++i) {

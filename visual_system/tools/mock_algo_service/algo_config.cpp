@@ -93,6 +93,7 @@ AlgoConfig LoadAlgoConfig(const std::filesystem::path& exe_dir) {
   config.debug_save_pointcloud = j.value("debugSavePointcloud", false);
   config.transfer_depth = j.value("transferDepth", config.transfer_depth);
   config.transfer_pointcloud = j.value("transferPointcloud", config.transfer_pointcloud);
+  config.transfer_gray = j.value("transferGray", config.transfer_gray);
   config.use_point_cloud_algo = j.value("usePointCloudAlgo", config.use_point_cloud_algo);
   config.point_cloud_config = j.value("pointCloudConfig", config.point_cloud_config);
   config.point_cloud_top_n = j.value("pointCloudTopN", config.point_cloud_top_n);

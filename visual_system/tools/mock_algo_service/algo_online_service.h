@@ -15,8 +15,8 @@ struct PointCloudProcessorSlot;
 int RunOnlineService(const AlgoConfig& config);
 
 /**
- * 单通道服务循环（供双线程各自绑定一块 SHM）。
- * processor_slot / algo_mu 可选：真实算法时每通道独立引擎，互斥串行化 DLL 调用。
+ * 单通道服务循环（R05/R09 各一线程、各绑一块 SHM）。
+ * processor_slot：每通道独立引擎；algo_mu：串行化 DLL 调用（避免并发 process）。
  * @return 异常退出码；正常常驻不返回。
  */
 int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannelId channel,

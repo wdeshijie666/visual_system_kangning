@@ -2,9 +2,9 @@
  * @file algo_shm_layout.h
  * @brief 视觉主进程与算法进程共享内存布局（Win32 命名映射）。
  *
- * 双工位并行（v5）：R05 / R09 各一块映射 + 独立互斥量 + 投递事件。
+ * 双工位并行（v6）：R05 / R09 各一块映射 + 独立互斥量 + 投递事件。
+ * 相对 v5：单相机 arena 增加灰度/可视化图像槽（transferGray）。
  * 默认 Local\：同会话普通用户即可 CreateFileMapping，无需管理员。
- * （Global\ 需要 SeCreateGlobalPrivilege，客户机常被 UAC 拦住。）
  * 布局：[ShmHeader][blob arena]
  */
 #pragma once
@@ -24,15 +24,15 @@ inline constexpr char kMutexName[] = "Local\\VisualSystemAlgoMutex_v2";
 enum class ShmChannelId : std::uint8_t { kR05 = 5, kR09 = 9 };
 
 /**
- * v5 双通道名（Local 命名空间）。
+ * v6 双通道名（Local 命名空间）。
  * 主程序与算法须同用户会话、同完整性级别启动；勿一只提权一只普通运行。
  */
-inline constexpr char kShmNameR05[] = "Local\\VisualSystemAlgo_R05_v5";
-inline constexpr char kMutexNameR05[] = "Local\\VisualSystemAlgoMutex_R05_v5";
-inline constexpr char kEventNameR05[] = "Local\\VisualSystemAlgoEvent_R05_v5";
-inline constexpr char kShmNameR09[] = "Local\\VisualSystemAlgo_R09_v5";
-inline constexpr char kMutexNameR09[] = "Local\\VisualSystemAlgoMutex_R09_v5";
-inline constexpr char kEventNameR09[] = "Local\\VisualSystemAlgoEvent_R09_v5";
+inline constexpr char kShmNameR05[] = "Local\\VisualSystemAlgo_R05_v6";
+inline constexpr char kMutexNameR05[] = "Local\\VisualSystemAlgoMutex_R05_v6";
+inline constexpr char kEventNameR05[] = "Local\\VisualSystemAlgoEvent_R05_v6";
+inline constexpr char kShmNameR09[] = "Local\\VisualSystemAlgo_R09_v6";
+inline constexpr char kMutexNameR09[] = "Local\\VisualSystemAlgoMutex_R09_v6";
+inline constexpr char kEventNameR09[] = "Local\\VisualSystemAlgoEvent_R09_v6";
 
 inline const char* ShmNameForChannel(ShmChannelId channel) {
   return channel == ShmChannelId::kR09 ? kShmNameR09 : kShmNameR05;
@@ -52,17 +52,19 @@ inline ShmChannelId ToShmChannel(StationId station) {
 }
 
 inline constexpr std::uint32_t kMagic = 0x56414C47;  // VALG
-/** Header：kMaxCameras=2，blob_arena_bytes，version=5。 */
-inline constexpr std::uint32_t kVersion = 5;
+/** Header：kMaxCameras=2，blob_arena_bytes，version=6（含图像槽）。 */
+inline constexpr std::uint32_t kVersion = 6;
 inline constexpr std::size_t kMaxCameras = 2;
 inline constexpr std::size_t kLogCount = 5;
 
-/** 单相机最大深度/点云字节数（覆盖常见 RVC X2 分辨率，如 2448×2048）。 */
+/** 单相机最大深度/点云/图像字节数（覆盖常见 RVC X2 分辨率，如 2448×2048）。 */
 inline constexpr std::size_t kMaxImageWidth = 2560;
 inline constexpr std::size_t kMaxImageHeight = 2200;
 inline constexpr std::size_t kMaxDepthBytes = kMaxImageWidth * kMaxImageHeight * sizeof(double);
 inline constexpr std::size_t kMaxPointCloudBytes =
     kMaxImageWidth * kMaxImageHeight * 3 * sizeof(double);
+/** 图像槽按 4 通道预留，足够 Mono8 请求与 BGR/BGRA 可视化回传。 */
+inline constexpr std::size_t kMaxImageBytes = kMaxImageWidth * kMaxImageHeight * 4;
 
 inline bool TransferHasDepth(std::uint32_t transfer_flags) {
   return HasTransferFlag(transfer_flags, AlgoTransferFlag::kDepth);
@@ -72,7 +74,11 @@ inline bool TransferHasPointCloud(std::uint32_t transfer_flags) {
   return HasTransferFlag(transfer_flags, AlgoTransferFlag::kPointCloud);
 }
 
-/** 单相机槽位字节：按 transfer 开关决定是否预留深度/点云。 */
+inline bool TransferHasGray(std::uint32_t transfer_flags) {
+  return HasTransferFlag(transfer_flags, AlgoTransferFlag::kGray);
+}
+
+/** 单相机槽位字节：按 transfer 开关决定是否预留深度/点云/图像。 */
 inline std::size_t CameraBlobStrideBytes(std::uint32_t transfer_flags) {
   std::size_t n = 0;
   if (TransferHasDepth(transfer_flags)) {
@@ -81,6 +87,9 @@ inline std::size_t CameraBlobStrideBytes(std::uint32_t transfer_flags) {
   if (TransferHasPointCloud(transfer_flags)) {
     n += kMaxPointCloudBytes;
   }
+  if (TransferHasGray(transfer_flags)) {
+    n += kMaxImageBytes;
+  }
   return n;
 }
 
@@ -88,8 +97,9 @@ inline std::size_t BlobArenaSizeForFlags(std::uint32_t transfer_flags) {
   return kMaxCameras * CameraBlobStrideBytes(transfer_flags);
 }
 
-/** 两模态都开时的上限（建映射/兼容用）。 */
-inline constexpr std::size_t kMaxCameraBlobBytes = kMaxDepthBytes + kMaxPointCloudBytes;
+/** 三模态都开时的上限（建映射/兼容用）。 */
+inline constexpr std::size_t kMaxCameraBlobBytes =
+    kMaxDepthBytes + kMaxPointCloudBytes + kMaxImageBytes;
 inline constexpr std::size_t kMaxBlobArenaSize = kMaxCameras * kMaxCameraBlobBytes;
 
 enum class State : std::uint32_t {
@@ -128,10 +138,22 @@ struct ShmPointCloudMeta {
   std::uint64_t blob_size = 0;
 };
 
+/** 请求：相机灰度 Mono8；响应：算法可视化图（可能为彩色）。 */
+struct ShmImageMeta {
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  ImagePixelFormat format = ImagePixelFormat::kNone;
+  std::uint32_t bytes_per_pixel = 0;
+  std::uint32_t row_stride_bytes = 0;
+  std::uint64_t blob_offset = 0;
+  std::uint64_t blob_size = 0;
+};
+
 struct ShmCameraPayload {
   char camera_serial[64]{};
   ShmDepthMeta depth{};
   ShmPointCloudMeta pointcloud{};
+  ShmImageMeta image{};
 };
 
 struct ShmHeader {

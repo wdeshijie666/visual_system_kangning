@@ -2,9 +2,23 @@
 
 视觉主进程（VisualSystem）与独立算法进程之间的 IPC 契约。头文件：`libs/adapter_algo_shm/include/visual/algo_shm_layout.h`。
 
-MVP 实现为 **Win32 命名 FileMapping + Mutex**；算法侧参考 `tools/mock_algo_service/main.cpp`。
+MVP 实现为 **Win32 命名 FileMapping + Mutex**；算法侧参考 `tools/mock_algo_service`。
 
-## 命名对象（双工位 v3）
+## 现行：双工位 v6（含灰度/可视化图像槽）
+
+| 通道 | SHM 映射名 | Mutex |
+|------|-----------|-------|
+| R05（含 R07） | `Local\\VisualSystemAlgo_R05_v6` | `Local\\VisualSystemAlgoMutex_R05_v6` |
+| R09 | `Local\\VisualSystemAlgo_R09_v6` | `Local\\VisualSystemAlgoMutex_R09_v6` |
+
+- Header `version = 6`；`ShmCameraPayload` 含 `depth` / `pointcloud` / `image`。
+- `transfer_flags`：`transferDepth` | `transferPointcloud` | **`transferGray`**（默认开）。
+- 请求：`image` 槽写相机 Mono8；算法 `process(depth, image)` 后 `getImage()` 写回同一槽（可为 BGR 等），视觉刷新预览视窗。
+- 加载旧配置时若通道名为 `_v5`，启动时自动改写为 `_v6`。
+
+---
+
+## 命名对象（历史双工位 v3，已过时）
 
 | 通道 | SHM 映射名 | Mutex | 说明 |
 |------|-----------|-------|------|
@@ -15,7 +29,7 @@ MVP 实现为 **Win32 命名 FileMapping + Mutex**；算法侧参考 `tools/mock
 
 Header 布局 version 仍为 **2**（字段未变）；通道命名独立为 v3。
 
-## 布局（version = 2）
+## 布局（历史 version = 2）
 
 每工位各一块完整映射，布局相同：
 

@@ -1,7 +1,7 @@
 /**
  * @file PointCloudProcessor_api.h
- * @brief 精简声明：不包含 pcl_visualizer，避免把 VTK 静态初始化链进调用方。
- *        成员布局须与 G:/ReconDLL/point_cloud/PointCloudProcessor.h 保持一致。
+ * @brief 精简声明：不拉 pcl_visualizer，避免 VTK 静态初始化进调用方。
+ *        数据成员布局必须与 G:/ReconDLL/point_cloud/PointCloudProcessor.h 一致。
  */
 #pragma once
 
@@ -53,10 +53,6 @@ class PointCloudProcessor {
   bool loadPLY(const std::string& file_path);
   bool loadXYZ(const std::string& file_path);
 
- private:
-  void preprocess(CloudPtr& cloud) const;
-
- public:
   double z_filter_min = 400.0;
   double z_filter_max = 500.0;
   int downsample_target = 100000;
@@ -64,7 +60,7 @@ class PointCloudProcessor {
   int min_cluster_size = 1000;
   int max_cluster_size = 250000;
 
-  int process(const cv::Mat& depth_map, int top_n = 5);
+  int process(const cv::Mat& depth_map, cv::Mat& drawImage = cv::Mat(), int top_n = 5);
   const std::vector<CloudPtr>& getClusters() const { return m_clusters; }
   CloudPtr getLastCloud() const { return m_last_cloud; }
   std::size_t getPointCount() const;
@@ -74,16 +70,9 @@ class PointCloudProcessor {
   double cylinder_radius_max = 100.0;
   double cylinder_inlier_ratio = 0.20;
   double cylinder_normal_z_min = 0.6;
-  void validateClusters();
   const std::vector<CylinderFitResult>& getFitResults() const { return m_fit_results; }
-
-  std::size_t transform();
-  std::size_t transform(const cv::Mat& R, const cv::Mat& T);
-
-  bool getXYBoundingBox(const pcl::PointIndices& indices, CylinderRange& bbox) const;
   const std::vector<CylinderRange>& getPreLocations() const { return m_pre_location; }
   bool savePreLocations(const std::string& path) const;
-  bool loadPreLocations(const std::string& path);
   bool loadConfig(const std::string& path);
 
   const cv::Mat& getCameraMatrix() const { return m_intrinsics; }
@@ -93,8 +82,19 @@ class PointCloudProcessor {
 
   bool loadDepthMap(const cv::Mat& depth);
   bool show(const std::string& window_title = "Point Cloud Viewer") const;
+  /** 最近一次 process 写入的可视化图（可能为彩色）。 */
+  cv::Mat getImage();
 
  private:
+  // 下列私有方法仅声明以保持与 DLL 导出符号一致；调用方勿使用。
+  bool loadPreLocations(const std::string& path);
+  void preprocess(CloudPtr& cloud) const;
+  void validateClusters();
+  std::size_t transform();
+  std::size_t transform(const cv::Mat& R, const cv::Mat& T);
+  cv::Mat drawClusterProjections(const cv::Mat& gray_image, bool draw_label = true) const;
+  bool getXYBoundingBox(const pcl::PointIndices& indices, CylinderRange& bbox) const;
+
   CloudPtr m_last_cloud;
   CloudPtr m_original_cloud;
   std::vector<CloudPtr> m_clusters;
@@ -104,4 +104,6 @@ class PointCloudProcessor {
   cv::Mat m_distortion;
   cv::Mat m_R;
   cv::Mat m_T;
+  // 与官方头一致：缺此成员会导致 new 尺寸偏小 → 构造越界 → process AV。
+  cv::Mat m_DrawImage;
 };

@@ -32,7 +32,8 @@
   },
   "dataStub": {
     "saveDepth": true,
-    "savePointcloud": false
+    "savePointcloud": false,
+    "saveGray": true
   },
   "algo": {
     "shmName": "Local\\VisualSystemAlgo_v2",
@@ -40,18 +41,19 @@
     "useShm": true,
     "transferDepth": true,
     "transferPointcloud": false,
+    "transferGray": true,
     "debugSaveDepth": false,
     "debugSavePointcloud": false,
     "programDir": "alg_program",
     "programExe": "mock_algo_service.exe",
     "channels": {
       "r05": {
-        "shmName": "Local\\VisualSystemAlgo_R05_v5",
-        "mutexName": "Local\\VisualSystemAlgoMutex_R05_v5"
+        "shmName": "Local\\VisualSystemAlgo_R05_v6",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R05_v6"
       },
       "r09": {
-        "shmName": "Local\\VisualSystemAlgo_R09_v5",
-        "mutexName": "Local\\VisualSystemAlgoMutex_R09_v5"
+        "shmName": "Local\\VisualSystemAlgo_R09_v6",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R09_v6"
       }
     }
   }

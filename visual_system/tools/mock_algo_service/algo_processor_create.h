@@ -26,8 +26,17 @@ PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& con
 
 bool PCP_LoadDepthMap(PointCloudProcessor* p, const cv::Mat& depth);
 std::size_t PCP_GetPointCount(PointCloudProcessor* p);
-int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, int top_n);
+/**
+ * 跑圆柱拟合（调用顺序对齐样例：process(depth, gray) → getImage() 进新 Mat）。
+ * @param draw_image 入参：非空时拷贝为底图传入 process（不就地复用该 Mat）；
+ *                   出参：成功后写入新 Mat（getImage()），不与入参底图共享缓冲。
+ *                   可为 nullptr（不传底图、也不取回可视化）。
+ * @return process 返回值；原生异常为 -999。
+ */
+int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, cv::Mat* draw_image, int top_n);
 std::size_t PCP_GetClusterCount(PointCloudProcessor* p);
+/** 取最近一次 process 后的可视化图；失败返回空 Mat。 */
+cv::Mat PCP_GetImage(PointCloudProcessor* p);
 
 struct PCP_FitResult {
   std::uint16_t log_index = 0;

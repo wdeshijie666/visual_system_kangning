@@ -118,7 +118,7 @@ struct PointCloudBuffer {
 
 
 
-/** 内存中的灰度图（Mono8），仅供 UI 预览，不落盘。 */
+/** 内存中的灰度图（Mono8）：UI 预览与 SHM transferGray。 */
 
 struct GrayImageBuffer {
 
@@ -136,7 +136,7 @@ struct GrayImageBuffer {
 
  * 单相机一次采集的完整载荷。
 
- * - 在线：depth/pointcloud/gray 填内存；落盘由 dataStub.saveDepth/savePointcloud 控制
+ * - 在线：depth/pointcloud/gray 填内存；落盘由 dataStub.save* 控制
 
  * - 回放：depth_path 等路径有效
 
@@ -149,6 +149,8 @@ struct CaptureBundle {
   std::string depth_path;     /**< dataStub.saveDepth 时写入 */
 
   std::string pointcloud_path; /**< dataStub.savePointcloud 时写入 */
+
+  std::string gray_path;      /**< dataStub.saveGray 时写入（Mono8 .pgm） */
 
   std::string camera_serial;
 
@@ -197,6 +199,12 @@ struct AlgoResponse {
   std::string message;
 
   LogResultBatch logs{};
+
+  /** 算法可视化图（transferGray 开启且引擎回传时有效）。 */
+  std::vector<std::uint8_t> result_image;
+  std::uint32_t result_image_width = 0;
+  std::uint32_t result_image_height = 0;
+  ImagePixelFormat result_image_format = ImagePixelFormat::kNone;
 
 };
 

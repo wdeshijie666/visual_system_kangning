@@ -199,6 +199,8 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
               visual::AppContext::Instance().Settings().algo_transfer_depth);
   root.insert(QStringLiteral("transferPointcloud"),
               visual::AppContext::Instance().Settings().algo_transfer_pointcloud);
+  root.insert(QStringLiteral("transferGray"),
+              visual::AppContext::Instance().Settings().algo_transfer_gray);
   // 保留真实算法开关（若文件已有则不强制改写；缺省写 true）
   if (!root.contains(QStringLiteral("usePointCloudAlgo"))) {
     root.insert(QStringLiteral("usePointCloudAlgo"), true);

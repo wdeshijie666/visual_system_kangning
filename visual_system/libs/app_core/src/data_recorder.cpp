@@ -131,6 +131,23 @@ bool WriteBlackGrayscalePgm(const fs::path& path, int width, int height) {
   return out.good();
 }
 
+bool WriteMono8GrayPgm(const fs::path& path, const GrayImageBuffer& gray) {
+  if (gray.width == 0 || gray.height == 0) {
+    return false;
+  }
+  const std::size_t expected = static_cast<std::size_t>(gray.width) * gray.height;
+  if (gray.data.size() < expected) {
+    return false;
+  }
+  std::ofstream out = OpenBinaryFile(path);
+  if (!out) {
+    return false;
+  }
+  out << "P5\n" << gray.width << " " << gray.height << "\n255\n";
+  out.write(reinterpret_cast<const char*>(gray.data.data()), static_cast<std::streamsize>(expected));
+  return out.good();
+}
+
 bool WriteUint16DepthPgm(const fs::path& path, const DepthImageBuffer& depth) {
   if (depth.format != DepthPixelFormat::kUint16Mm || depth.width == 0 || depth.height == 0) {
     return false;
@@ -299,7 +316,7 @@ std::string MakeCaptureFilePrefix(const CaptureRecordContext& ctx, const std::st
 }
 
 void AssignCapturePaths(CaptureBundle* bundle, const std::string& session_dir, const std::string& prefix) {
-  // 按 dataStub.saveDepth / savePointcloud 预生成路径；灰度图不落盘
+  // 按 dataStub.saveDepth / savePointcloud / saveGray 预生成路径
   if (bundle == nullptr) {
     return;
   }
@@ -320,6 +337,11 @@ void AssignCapturePaths(CaptureBundle* bundle, const std::string& session_dir, c
   } else {
     bundle->pointcloud_path.clear();
   }
+  if (settings.stub_save_gray) {
+    bundle->gray_path = (fs::path(session_dir) / (prefix + "_gray.pgm")).string();
+  } else {
+    bundle->gray_path.clear();
+  }
 }
 
 bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
@@ -328,15 +350,18 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
   }
   const bool want_depth = !bundle.depth_path.empty();
   const bool want_ply = !bundle.pointcloud_path.empty();
-  if (!want_depth && !want_ply) {
+  const bool want_gray = !bundle.gray_path.empty();
+  if (!want_depth && !want_ply && !want_gray) {
     return true;  // 配置为全部不存根，视为成功
   }
 
   std::string session_dir;
   if (want_depth) {
     session_dir = fs::path(bundle.depth_path).parent_path().string();
-  } else {
+  } else if (want_ply) {
     session_dir = fs::path(bundle.pointcloud_path).parent_path().string();
+  } else {
+    session_dir = fs::path(bundle.gray_path).parent_path().string();
   }
 
   {
@@ -398,6 +423,18 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
           QString("save ply failed: %1").arg(QString::fromStdString(bundle.pointcloud_path)));
     }
     ok = ply_ok && ok;
+  }
+  if (want_gray) {
+    bool gray_ok = false;
+    if (bundle.gray) {
+      gray_ok = WriteMono8GrayPgm(fs::path(bundle.gray_path), *bundle.gray);
+    }
+    if (!gray_ok) {
+      EventBus::Instance().NotifyLog(
+          LogSeverity::kWarning,
+          QString("save gray failed: %1").arg(QString::fromStdString(bundle.gray_path)));
+    }
+    ok = gray_ok && ok;
   }
   return ok;
 }

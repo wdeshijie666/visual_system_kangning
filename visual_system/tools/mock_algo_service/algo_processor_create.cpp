@@ -4,6 +4,7 @@
  */
 #include "algo_processor_create.h"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -95,14 +96,52 @@ std::size_t PCP_GetPointCount(PointCloudProcessor* p) {
   }
 }
 
-int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, int top_n) {
+int PCP_Process(PointCloudProcessor* p, const cv::Mat& depth, cv::Mat* draw_image, int top_n) {
   if (p == nullptr || depth.empty()) {
     return -999;
   }
   try {
-    return p->process(depth, top_n);
+    // 样例契约：process(depth, gray) → getImage()；底图用独立副本，避免与引擎共享缓冲。
+    cv::Mat gray_image;
+    if (draw_image != nullptr && !draw_image->empty()) {
+      gray_image = draw_image->clone();
+    }
+    cv::Mat empty;
+    cv::Mat& draw_ref = gray_image.empty() ? empty : gray_image;
+
+    const int n = p->process(depth, draw_ref, top_n);
+
+    // 新 Mat 接住可视化图后按行拷出，不把引擎内部 Mat 直接交给调用方持有。
+    if (n >= 0 && draw_image != nullptr) {
+      cv::Mat image = p->getImage();
+      if (!image.empty()) {
+        draw_image->create(image.rows, image.cols, image.type());
+        if (image.isContinuous() && draw_image->isContinuous()) {
+          std::memcpy(draw_image->data, image.data, image.total() * image.elemSize());
+        } else {
+          for (int r = 0; r < image.rows; ++r) {
+            std::memcpy(draw_image->ptr(r), image.ptr(r),
+                        static_cast<std::size_t>(image.cols) * image.elemSize());
+          }
+        }
+      } else {
+        draw_image->release();
+      }
+    }
+    return n;
   } catch (...) {
     return -999;
+  }
+}
+
+cv::Mat PCP_GetImage(PointCloudProcessor* p) {
+  if (p == nullptr) {
+    return {};
+  }
+  try {
+    return p->getImage();
+  } catch (...) {
+    return {};
   }
 }
 

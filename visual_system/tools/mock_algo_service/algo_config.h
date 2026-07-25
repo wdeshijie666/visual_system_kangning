@@ -60,6 +60,7 @@ struct AlgoConfig {
   /** 与 setting.json algo.transferDepth / transferPointcloud 对齐，决定 SHM arena 预留。 */
   bool transfer_depth = true;
   bool transfer_pointcloud = false;
+  bool transfer_gray = true;
   /** 日志等级：info=产线日常，debug=详细排查。 */
   LogLevel log_level = LogLevel::kInfo;
 };

@@ -9,6 +9,7 @@
   "debugSavePointcloud": false,
   "transferDepth": true,
   "transferPointcloud": false,
+  "transferGray": true,
   "pipelineSimulation": {
     "enabled": false,
     "imageWidth": 2448,
@@ -29,13 +30,13 @@
   "channels": {
     "r05": {
       "enabled": true,
-      "shmName": "Local\\VisualSystemAlgo_R05_v5",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v5"
+      "shmName": "Local\\VisualSystemAlgo_R05_v6",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v6"
     },
     "r09": {
       "enabled": true,
-      "shmName": "Local\\VisualSystemAlgo_R09_v5",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v5"
+      "shmName": "Local\\VisualSystemAlgo_R09_v6",
+      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v6"
     }
   }
 }

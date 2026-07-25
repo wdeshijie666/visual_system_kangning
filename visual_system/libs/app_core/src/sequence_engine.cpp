@@ -10,6 +10,7 @@
 #include <QStringList>
 
 #include "visual/alarm_service.h"
+#include "visual/capture_data_format.h"
 #include "visual/data_recorder.h"
 #include "visual/event_bus.h"
 #include "visual/log_format.h"
@@ -18,16 +19,35 @@
 namespace visual {
 namespace {
 
-void FillGrayPreview(CycleResultEvent* ev, const GrayImageBuffer& gray) {
+void FillPreviewFromGray(CycleResultEvent* ev, const GrayImageBuffer& gray) {
   if (ev == nullptr || gray.width == 0 || gray.height == 0 ||
       gray.data.size() < static_cast<std::size_t>(gray.width) * gray.height) {
     return;
   }
-  ev->gray_width = static_cast<int>(gray.width);
-  ev->gray_height = static_cast<int>(gray.height);
-  ev->gray_bytes =
+  ev->image_width = static_cast<int>(gray.width);
+  ev->image_height = static_cast<int>(gray.height);
+  ev->image_format = ImagePixelFormat::kMono8;
+  ev->image_bytes =
       QByteArray(reinterpret_cast<const char*>(gray.data.data()),
                  static_cast<int>(static_cast<std::size_t>(gray.width) * gray.height));
+}
+
+void FillPreviewFromAlgo(CycleResultEvent* ev, const AlgoResponse& resp) {
+  if (ev == nullptr || resp.result_image.empty() || resp.result_image_width == 0 ||
+      resp.result_image_height == 0 || resp.result_image_format == ImagePixelFormat::kNone) {
+    return;
+  }
+  const std::uint32_t bpp = BytesPerImagePixel(resp.result_image_format);
+  const std::size_t need =
+      static_cast<std::size_t>(resp.result_image_width) * resp.result_image_height * bpp;
+  if (bpp == 0 || resp.result_image.size() < need) {
+    return;
+  }
+  ev->image_width = static_cast<int>(resp.result_image_width);
+  ev->image_height = static_cast<int>(resp.result_image_height);
+  ev->image_format = resp.result_image_format;
+  ev->image_bytes = QByteArray(reinterpret_cast<const char*>(resp.result_image.data()),
+                               static_cast<int>(need));
 }
 
 std::vector<StationId> CompletedStations(StationId primary, bool single_station_only) {
@@ -543,7 +563,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
           settings.algo_transfer_depth || (settings.stub_save_depth && cam_info_pre.is_stub);
       copy_opts.copy_pointcloud =
           settings.algo_transfer_pointcloud || settings.stub_save_pointcloud;
-      copy_opts.copy_gray = true;
+      copy_opts.copy_gray = settings.algo_transfer_gray || settings.stub_save_gray;
       CaptureBundle bundle = it->second->Capture(copy_opts);
       const std::string file_prefix = MakeCaptureFilePrefix(record_ctx, cam_id);
       if (!bundle.ok) {
@@ -576,6 +596,15 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
           ply_job.pointcloud = bundle.pointcloud;
           ply_job.pointcloud_path = bundle.pointcloud_path;
           CaptureSaveWorker::Instance().Enqueue(std::move(ply_job));
+        }
+
+        if (!bundle.gray_path.empty() && bundle.gray) {
+          CaptureBundle gray_job;
+          gray_job.ok = true;
+          gray_job.camera_serial = bundle.camera_serial;
+          gray_job.gray = bundle.gray;
+          gray_job.gray_path = bundle.gray_path;
+          CaptureSaveWorker::Instance().Enqueue(std::move(gray_job));
         }
 
         const auto cam_info = it->second->GetInfo();
@@ -754,11 +783,15 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
   ev.station = station;
   ev.logs = algo_resp.logs;
   ev.session_dir = QString::fromStdString(record_ctx.output_dir);
-  for (const auto& capture : req.captures) {
-    if (capture.ok && capture.gray) {
-      FillGrayPreview(&ev, *capture.gray);
-      if (!ev.gray_bytes.isEmpty()) {
-        break;
+  // 优先显示算法回传可视化图；否则回退采图原始灰度（transferGray=false 时亦如此）
+  FillPreviewFromAlgo(&ev, algo_resp);
+  if (ev.image_bytes.isEmpty()) {
+    for (const auto& capture : req.captures) {
+      if (capture.ok && capture.gray) {
+        FillPreviewFromGray(&ev, *capture.gray);
+        if (!ev.image_bytes.isEmpty()) {
+          break;
+        }
       }
     }
   }

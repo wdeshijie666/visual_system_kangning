@@ -37,7 +37,7 @@ CaptureRecordContext BuildCaptureRecordContext(StationId station, const std::str
 /** 生成单相机文件前缀：{yyyyMMdd}_{hhmmss}_{station}_{cam_id}。 */
 std::string MakeCaptureFilePrefix(const CaptureRecordContext& ctx, const std::string& camera_id);
 
-/** 按 dataStub 开关预生成深度/点云落盘路径（不写文件；灰度不落盘）。 */
+/** 按 dataStub 开关预生成深度/点云/灰度落盘路径（不写文件）。 */
 void AssignCapturePaths(CaptureBundle* bundle, const std::string& session_dir, const std::string& prefix);
 
 /** 将内存中的深度/点云按已赋值路径写入磁盘。 */

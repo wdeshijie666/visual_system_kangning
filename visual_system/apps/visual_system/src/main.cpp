@@ -176,9 +176,10 @@ int main(int argc, char* argv[]) {
   }
 
   visual::EventBus::Instance().NotifyLog(
-      QStringLiteral("存图 深度=%1 点云=%2 保留=%3天")
+      QStringLiteral("存图 深度=%1 点云=%2 灰度=%3 保留=%4天")
           .arg(settings.stub_save_depth ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.stub_save_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
+          .arg(settings.stub_save_gray ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.data_retention_days));
 
   SplashStatus(&splash, QStringLiteral("正在准备数据清理与设备服务"));
@@ -208,9 +209,10 @@ int main(int argc, char* argv[]) {
                                              QStringLiteral("算法 SHM 映射失败"));
     }
     visual::EventBus::Instance().NotifyLog(
-        QStringLiteral("算法共享内存通道已配置 transferDepth=%1 transferPointcloud=%2")
+        QStringLiteral("算法共享内存通道已配置 transferDepth=%1 transferPointcloud=%2 transferGray=%3")
             .arg(settings.algo_transfer_depth ? QStringLiteral("开") : QStringLiteral("关"))
-            .arg(settings.algo_transfer_pointcloud ? QStringLiteral("开") : QStringLiteral("关")));
+            .arg(settings.algo_transfer_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
+            .arg(settings.algo_transfer_gray ? QStringLiteral("开") : QStringLiteral("关")));
   } else {
     algo = std::make_shared<visual::MockAlgoService>();
   }

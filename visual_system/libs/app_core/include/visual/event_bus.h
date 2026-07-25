@@ -9,6 +9,7 @@
 #include <QString>
 
 #include "visual/station_types.h"
+#include "visual/capture_data_format.h"
 #include "visual/log_format.h"
 
 namespace visual {
@@ -17,10 +18,11 @@ struct CycleResultEvent {
   StationId station = StationId::kR05;
   LogResultBatch logs{};
   QString session_dir;
-  /** 工位预览用 Mono8 灰度（内存，不落盘）。 */
-  QByteArray gray_bytes;
-  int gray_width = 0;
-  int gray_height = 0;
+  /** 工位预览图（采图灰度或算法可视化回传；格式见 image_format）。 */
+  QByteArray image_bytes;
+  int image_width = 0;
+  int image_height = 0;
+  ImagePixelFormat image_format = ImagePixelFormat::kMono8;
   bool plc_ok = false;
   bool algo_ok = false;
 };

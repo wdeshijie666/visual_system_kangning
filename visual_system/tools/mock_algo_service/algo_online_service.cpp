@@ -46,6 +46,9 @@ std::uint32_t TransferFlagsFromConfig(const AlgoConfig& config) {
   if (config.transfer_pointcloud) {
     flags |= static_cast<std::uint32_t>(visual::AlgoTransferFlag::kPointCloud);
   }
+  if (config.transfer_gray) {
+    flags |= static_cast<std::uint32_t>(visual::AlgoTransferFlag::kGray);
+  }
   if (flags == 0) {
     flags = static_cast<std::uint32_t>(visual::AlgoTransferFlag::kDepth);
   }
@@ -252,12 +255,13 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
 #if defined(VS_HAS_POINTCLOUD_ALGO)
         if (config.use_point_cloud_algo) {
           bool algo_ok = false;
-          AlgoInfo(std::string("[") + tag + "] 开始计算");
           try {
+            // 先拿全局算法锁再打「开始计算」，避免 R05 仍在 process 时 R09 日志造成“并发进入”假象。
             std::unique_lock<std::mutex> lock;
             if (algo_mu != nullptr) {
               lock = std::unique_lock<std::mutex>(*algo_mu);
             }
+            AlgoInfo(std::string("[") + tag + "] 开始计算");
             algo_ok = RunPointCloudFromShm(header, blob_arena, blob_arena_size, config, exe_dir,
                                            header->logs, visual::shm::kLogCount, &algo_error,
                                            processor_slot);
@@ -347,7 +351,7 @@ int RunOnlineService(const AlgoConfig& config) {
 
 #if defined(VS_HAS_POINTCLOUD_ALGO)
   std::mutex algo_mu;
-  // 引擎惰性创建（首次计算时）：避免构造 PointCloudProcessor 阻塞/崩溃导致永远无 CHANNEL_READY
+  // R05/R09 各一实例；mutex 仅串行化 process，避免并发进入 DLL。
   PointCloudProcessorSlot slot_r05;
   PointCloudProcessorSlot slot_r09;
 

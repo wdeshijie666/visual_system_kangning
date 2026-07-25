@@ -66,6 +66,35 @@ void NormalizeAlgoChannelsAwayFromGlobal(AppSettings* settings) {
   }
 }
 
+/** SHM 协议 v5→v6：映射名后缀升级，避免与旧 alg_program 错配。 */
+bool RewriteAlgoNameV5ToV6(std::string* name) {
+  if (name == nullptr || name->size() < 3) {
+    return false;
+  }
+  const std::string from = "_v5";
+  const std::string to = "_v6";
+  const auto pos = name->rfind(from);
+  if (pos == std::string::npos || pos + from.size() != name->size()) {
+    return false;
+  }
+  name->replace(pos, from.size(), to);
+  return true;
+}
+
+void NormalizeAlgoChannelsToV6(AppSettings* settings) {
+  if (settings == nullptr) {
+    return;
+  }
+  bool changed = false;
+  changed |= RewriteAlgoNameV5ToV6(&settings->algo_channel_r05.shm_name);
+  changed |= RewriteAlgoNameV5ToV6(&settings->algo_channel_r05.mutex_name);
+  changed |= RewriteAlgoNameV5ToV6(&settings->algo_channel_r09.shm_name);
+  changed |= RewriteAlgoNameV5ToV6(&settings->algo_channel_r09.mutex_name);
+  if (changed) {
+    std::fprintf(stderr, "[info] algo SHM/Mutex 通道名已从 _v5 升级为 _v6（含灰度图像槽）。\n");
+  }
+}
+
 void ParseAlgoChannel(const json& ch, AlgoChannelSettings* out) {
   if (out == nullptr || !ch.is_object()) {
     return;
@@ -180,6 +209,7 @@ bool AppContext::Load() {
     settings_.algo_transfer_depth = j["algo"].value("transferDepth", settings_.algo_transfer_depth);
     settings_.algo_transfer_pointcloud =
         j["algo"].value("transferPointcloud", settings_.algo_transfer_pointcloud);
+    settings_.algo_transfer_gray = j["algo"].value("transferGray", settings_.algo_transfer_gray);
     settings_.algo_debug_save_depth =
         j["algo"].value("debugSaveDepth", settings_.algo_debug_save_depth);
     settings_.algo_debug_save_pointcloud =
@@ -197,10 +227,12 @@ bool AppContext::Load() {
   }
   FillDefaultAlgoChannels(&settings_);
   NormalizeAlgoChannelsAwayFromGlobal(&settings_);
+  NormalizeAlgoChannelsToV6(&settings_);
   if (j.contains("dataStub")) {
     settings_.stub_save_depth = j["dataStub"].value("saveDepth", settings_.stub_save_depth);
     settings_.stub_save_pointcloud =
         j["dataStub"].value("savePointcloud", settings_.stub_save_pointcloud);
+    settings_.stub_save_gray = j["dataStub"].value("saveGray", settings_.stub_save_gray);
   }
   if (j.contains("runMode")) {
     settings_.run_mode = ParseRunMode(j.value("runMode", RunModeToString(settings_.run_mode)));
@@ -277,6 +309,7 @@ bool AppContext::Save() {
   j["algo"]["useShm"] = settings_.use_shm_algo;
   j["algo"]["transferDepth"] = settings_.algo_transfer_depth;
   j["algo"]["transferPointcloud"] = settings_.algo_transfer_pointcloud;
+  j["algo"]["transferGray"] = settings_.algo_transfer_gray;
   j["algo"]["debugSaveDepth"] = settings_.algo_debug_save_depth;
   j["algo"]["debugSavePointcloud"] = settings_.algo_debug_save_pointcloud;
   j["algo"]["programDir"] = settings_.algo_program_dir;
@@ -287,6 +320,7 @@ bool AppContext::Save() {
   j["algo"]["channels"]["r09"]["mutexName"] = settings_.algo_channel_r09.mutex_name;
   j["dataStub"]["saveDepth"] = settings_.stub_save_depth;
   j["dataStub"]["savePointcloud"] = settings_.stub_save_pointcloud;
+  j["dataStub"]["saveGray"] = settings_.stub_save_gray;
   j["runMode"] = RunModeToString(settings_.run_mode);
   j["simulation"]["imageWidth"] = settings_.simulation.image_width;
   j["simulation"]["imageHeight"] = settings_.simulation.image_height;

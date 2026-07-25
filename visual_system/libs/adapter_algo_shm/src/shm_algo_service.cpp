@@ -256,6 +256,12 @@ bool ShmAlgoService::Run(const AlgoRequest& req, AlgoResponse* resp, int timeout
       for (std::size_t i = 0; i < shm::kLogCount; ++i) {
         resp->logs[i] = FromShm(header_->logs[i]);
       }
+      std::string img_err;
+      if (shm::ReadFirstResultImage(header_, blob_arena_, blob_arena_size_, &resp->result_image,
+                                    &resp->result_image_width, &resp->result_image_height,
+                                    &resp->result_image_format, &img_err)) {
+        // 可视化图已填入 resp
+      }
       resp->ok = true;
       header_->state = shm::State::kIdle;
       ReleaseMutex(mtx);

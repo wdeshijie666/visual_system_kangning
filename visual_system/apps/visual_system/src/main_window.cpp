@@ -533,10 +533,12 @@ void MainWindow::OnCycleCompleted(const visual::CycleResultEvent& event) {
 
   if (event.station == visual::StationId::kR09) {
     r09_table_->UpdateResults(event.logs);
-    r09_viewport_->SetGrayImage(event.gray_bytes, event.gray_width, event.gray_height);
+    r09_viewport_->SetPreviewImage(event.image_bytes, event.image_width, event.image_height,
+                                   event.image_format);
   } else {
     r05_table_->UpdateResults(event.logs);
-    r05_viewport_->SetGrayImage(event.gray_bytes, event.gray_width, event.gray_height);
+    r05_viewport_->SetPreviewImage(event.image_bytes, event.image_width, event.image_height,
+                                   event.image_format);
   }
   statusBar()->showMessage(tr("周期完成 station=%1 algo=%2 plc=%3")
                                .arg(static_cast<int>(event.station))

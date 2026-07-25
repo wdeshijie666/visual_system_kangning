@@ -13,7 +13,10 @@
 
 namespace algo {
 
-/** 每通道独立引擎；分辨率变化时重建，避免 DLL 内部按旧尺寸缓存崩溃。 */
+/**
+ * 每通道独立引擎槽（R05/R09 不共用实例）。
+ * 仅在有效深度时惰性创建，同分辨率跨周期复用；空点云不创建。
+ */
 struct PointCloudProcessorSlot {
   PointCloudProcessorPtr processor;
   int last_depth_w = -1;
@@ -21,12 +24,11 @@ struct PointCloudProcessorSlot {
 };
 
 /**
- * 从 SHM 读取第一路有效深度图并跑圆柱拟合。
- * @param slot 非空时复用/按分辨率重建该通道实例；空则临时构造。
- * @return false 表示输入无效或算法抛错级失败（写入 error）。
- *         无有效圆柱时仍返回 true，logs 填 NG。
+ * 从 SHM 读取第一路有效深度并跑圆柱拟合；开启 transferGray 时写回可视化图。
+ * @param slot 非空时使用该通道引擎槽；空则本请求临时构造。
+ * @return false 表示输入无效或算法失败；无有效圆柱仍返回 true（logs 为 NG）。
  */
-bool RunPointCloudFromShm(const visual::shm::ShmHeader* header, const std::uint8_t* blob_arena,
+bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,
                           std::size_t blob_arena_size, const AlgoConfig& config,
                           const std::filesystem::path& exe_dir, visual::shm::ShmLogResult* logs,
                           std::size_t log_count, std::string* error,

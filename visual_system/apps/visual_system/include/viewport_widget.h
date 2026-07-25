@@ -5,6 +5,8 @@
 #include <QImage>
 #include <QString>
 
+#include "visual/capture_data_format.h"
+
 class QGraphicsPixmapItem;
 class QGraphicsScene;
 class QGraphicsView;
@@ -16,6 +18,9 @@ class ViewportWidget : public QGroupBox {
  public:
   explicit ViewportWidget(const QString& title, QWidget* parent = nullptr);
 
+  /** 预览图：支持 Mono8 / BGR / RGB（自适应）。 */
+  void SetPreviewImage(const QByteArray& bytes, int width, int height,
+                       visual::ImagePixelFormat format);
   void SetGrayImage(const QByteArray& mono8, int width, int height);
   void ClearGrayImage();
 

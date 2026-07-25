@@ -47,12 +47,14 @@ struct AppSettings {
   bool use_shm_algo = true;
   bool algo_transfer_depth = true;
   bool algo_transfer_pointcloud = false;
+  bool algo_transfer_gray = true;
   /** 算法进程调试落盘：收到对应模态后写入 alg_program/data。 */
   bool algo_debug_save_depth = false;
   bool algo_debug_save_pointcloud = false;
-  /** 视觉侧采集存根：默认只存深度，可再开点云。 */
+  /** 视觉侧采集存根。 */
   bool stub_save_depth = true;
   bool stub_save_pointcloud = false;
+  bool stub_save_gray = true;
   /** 相对程序目录，默认 alg_program */
   std::string algo_program_dir = "alg_program";
   std::string algo_program_exe = "mock_algo_service.exe";
@@ -67,6 +69,9 @@ inline std::uint32_t BuildAlgoTransferFlags(const AppSettings& settings) {
   }
   if (settings.algo_transfer_pointcloud) {
     flags |= static_cast<std::uint32_t>(AlgoTransferFlag::kPointCloud);
+  }
+  if (settings.algo_transfer_gray) {
+    flags |= static_cast<std::uint32_t>(AlgoTransferFlag::kGray);
   }
   return flags;
 }

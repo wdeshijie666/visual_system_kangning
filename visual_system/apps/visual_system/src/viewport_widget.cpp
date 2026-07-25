@@ -49,14 +49,73 @@ ViewportWidget::ViewportWidget(const QString& title, QWidget* parent) : QGroupBo
   root->setCurrentWidget(empty_label_);
 }
 
-void ViewportWidget::SetGrayImage(const QByteArray& mono8, int width, int height) {
-  if (mono8.isEmpty() || width <= 0 || height <= 0 || mono8.size() < width * height) {
+void ViewportWidget::SetPreviewImage(const QByteArray& bytes, int width, int height,
+                                     visual::ImagePixelFormat format) {
+  if (bytes.isEmpty() || width <= 0 || height <= 0) {
     ClearGrayImage();
     return;
   }
-  const QImage view(reinterpret_cast<const uchar*>(mono8.constData()), width, height, width,
-                    QImage::Format_Grayscale8);
-  source_image_ = view.copy();
+  const int bpp = static_cast<int>(visual::BytesPerImagePixel(format));
+  if (bpp <= 0 || bytes.size() < width * height * bpp) {
+    ClearGrayImage();
+    return;
+  }
+
+  QImage view;
+  switch (format) {
+    case visual::ImagePixelFormat::kMono8:
+      view = QImage(reinterpret_cast<const uchar*>(bytes.constData()), width, height, width,
+                    QImage::Format_Grayscale8)
+                 .copy();
+      break;
+    case visual::ImagePixelFormat::kBgr8: {
+      // Qt5 广泛支持 RGB888：BGR → RGB 拷贝
+      view = QImage(width, height, QImage::Format_RGB888);
+      const auto* src = reinterpret_cast<const uchar*>(bytes.constData());
+      for (int y = 0; y < height; ++y) {
+        const uchar* s = src + y * width * 3;
+        uchar* d = view.scanLine(y);
+        for (int x = 0; x < width; ++x) {
+          d[x * 3 + 0] = s[x * 3 + 2];
+          d[x * 3 + 1] = s[x * 3 + 1];
+          d[x * 3 + 2] = s[x * 3 + 0];
+        }
+      }
+      break;
+    }
+    case visual::ImagePixelFormat::kRgb8:
+      view = QImage(reinterpret_cast<const uchar*>(bytes.constData()), width, height, width * 3,
+                    QImage::Format_RGB888)
+                 .copy();
+      break;
+    case visual::ImagePixelFormat::kBgra8:
+    case visual::ImagePixelFormat::kRgba8: {
+      view = QImage(width, height, QImage::Format_RGB888);
+      const auto* src = reinterpret_cast<const uchar*>(bytes.constData());
+      const bool bgra = (format == visual::ImagePixelFormat::kBgra8);
+      for (int y = 0; y < height; ++y) {
+        const uchar* s = src + y * width * 4;
+        uchar* d = view.scanLine(y);
+        for (int x = 0; x < width; ++x) {
+          if (bgra) {
+            d[x * 3 + 0] = s[x * 4 + 2];
+            d[x * 3 + 1] = s[x * 4 + 1];
+            d[x * 3 + 2] = s[x * 4 + 0];
+          } else {
+            d[x * 3 + 0] = s[x * 4 + 0];
+            d[x * 3 + 1] = s[x * 4 + 1];
+            d[x * 3 + 2] = s[x * 4 + 2];
+          }
+        }
+      }
+      break;
+    }
+    default:
+      ClearGrayImage();
+      return;
+  }
+
+  source_image_ = view;
   pixmap_item_->setPixmap(QPixmap::fromImage(source_image_));
   scene_->setSceneRect(pixmap_item_->boundingRect());
   has_user_transform_ = false;
@@ -65,6 +124,10 @@ void ViewportWidget::SetGrayImage(const QByteArray& mono8, int width, int height
     root->setCurrentWidget(view_);
   }
   FitInViewIfNeeded(true);
+}
+
+void ViewportWidget::SetGrayImage(const QByteArray& mono8, int width, int height) {
+  SetPreviewImage(mono8, width, height, visual::ImagePixelFormat::kMono8);
 }
 
 void ViewportWidget::ClearGrayImage() {

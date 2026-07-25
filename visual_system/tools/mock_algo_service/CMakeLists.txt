@@ -66,8 +66,9 @@ if(VS_HAS_POINTCLOUD_ALGO)
   endfunction()
 
   set(OPENCV_LIBS "")
+  # OpenCV 4.12（与 PointCloudProcessor 一致，导入库后缀 4）
   foreach(_m core imgproc imgcodecs calib3d highgui features2d flann)
-    tp_lib(OPENCV_LIBS "opencv_${_m}480.lib" "opencv_${_m}480d.lib")
+    tp_lib(OPENCV_LIBS "opencv_${_m}4.lib" "opencv_${_m}4d.lib")
   endforeach()
 
   set(PCL_LIBS "")
@@ -138,6 +139,7 @@ if(VS_HAS_POINTCLOUD_ALGO)
     COMMAND ${CMAKE_COMMAND}
       -DSRC=${THIRD_PARTY_BIN_DIR}
       -DSRC_RELEASE=${CMAKE_CURRENT_SOURCE_DIR}/runtime_release_overrides
+      -DWEBP_RELEASE_DIR=G:/ReconDLL/Decode/Release
       -DDST=$<TARGET_FILE_DIR:mock_algo_service>
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_release_dlls.cmake"
     COMMENT "Deploy PointCloudProcessor + third-party + MSVC DLLs beside mock_algo_service"

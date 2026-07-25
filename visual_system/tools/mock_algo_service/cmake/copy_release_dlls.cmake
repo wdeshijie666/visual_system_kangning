@@ -2,13 +2,14 @@
 # 从第三方 bin 拷贝 DLL 到算法进程目录，并尽量排除 Debug CRT 依赖。
 # 必填: -DSRC= -DDST=
 # 可选: -DSRC_RELEASE=  (Release 覆盖目录，优先于 SRC 同名 DLL)
+# 可选: -DWEBP_RELEASE_DIR= (Release libwebp* 目录，供 OpenCV 4.12 imgcodecs)
 if(NOT SRC OR NOT DST)
   message(FATAL_ERROR "copy_release_dlls.cmake requires -DSRC= and -DDST=")
 endif()
 file(MAKE_DIRECTORY "${DST}")
 
 # ---------------------------------------------------------------------------
-# 1) 从 SRC 拷贝，按文件名过滤明显 Debug 产物
+# 1) 从 SRC 拷贝，按文件名过滤明显 Debug 产物与 OpenCV 4.8（*480）
 # ---------------------------------------------------------------------------
 file(GLOB _dlls "${SRC}/*.dll")
 set(_copied 0)
@@ -16,7 +17,9 @@ foreach(_dll IN LISTS _dlls)
   get_filename_component(_name "${_dll}" NAME)
   string(TOLOWER "${_name}" _name_l)
   # 仅按明确 Debug 命名过滤；勿用笼统 *d.dll（会误伤 zstd.dll 等）
+  # OpenCV：算法与 mock_algo 统一 4.12（*4），跳过 4.8（*480）
   if(_name_l MATCHES "480d\\.dll$"
+      OR _name_l MATCHES "opencv_.*480\\.dll$"
       OR _name_l MATCHES "4d\\.dll$"
       OR _name_l MATCHES "-9\\.3d\\.dll$"
       OR _name_l MATCHES "-gd-"
@@ -52,6 +55,14 @@ if(SRC_RELEASE AND EXISTS "${SRC_RELEASE}")
   endforeach()
   message(STATUS "Overlaid ${_overlaid} Release DLL(s) from ${SRC_RELEASE}")
 endif()
+
+# 清掉目录里残留的 OpenCV 4.8（含历史 core480 别名兼容文件）
+file(GLOB _cv480_left "${DST}/opencv_*480.dll" "${DST}/opencv_*480d.dll")
+foreach(_dll IN LISTS _cv480_left)
+  get_filename_component(_name "${_dll}" NAME)
+  file(REMOVE "${_dll}")
+  message(STATUS "Removed OpenCV 4.8 leftover: ${_name}")
+endforeach()
 
 # ---------------------------------------------------------------------------
 # 3) 删除仍依赖 Debug CRT 的 DLL（避免客户机缺 VCRUNTIME140D.dll）
@@ -110,6 +121,73 @@ if(_dumpbin)
   message(STATUS "Removed ${_removed_dbg} Debug-CRT-linked DLL(s) from ${DST}")
 else()
   message(WARNING "dumpbin not found; cannot purge Debug-CRT DLLs by dependency scan")
+endif()
+
+# ---------------------------------------------------------------------------
+# 3.5) OpenCV 4.12 imgcodecs 依赖 libwebp*；third_party/bin 里多为 Debug CRT，
+#      会被上一步删掉。改用已知 Release 包补齐。
+# ---------------------------------------------------------------------------
+set(_webp_names
+  libwebp.dll libwebpdecoder.dll libwebpdemux.dll libwebpmux.dll libsharpyuv.dll)
+set(_webp_src_dir "")
+if(WEBP_RELEASE_DIR AND EXISTS "${WEBP_RELEASE_DIR}/libwebp.dll")
+  set(_webp_src_dir "${WEBP_RELEASE_DIR}")
+else()
+  get_filename_component(_tp_root "${SRC}" DIRECTORY)
+  get_filename_component(_recon_root "${_tp_root}" DIRECTORY)
+  foreach(_cand IN ITEMS
+      "${_recon_root}/Decode/Release"
+      "${_recon_root}/third_party_v0/bin/Release")
+    if(EXISTS "${_cand}/libwebp.dll")
+      set(_webp_src_dir "${_cand}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(_webp_src_dir)
+  set(_webp_n 0)
+  foreach(_name IN LISTS _webp_names)
+    if(EXISTS "${_webp_src_dir}/${_name}")
+      execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_webp_src_dir}/${_name}" "${DST}/${_name}")
+      math(EXPR _webp_n "${_webp_n}+1")
+    endif()
+  endforeach()
+  message(STATUS "Deployed ${_webp_n} Release libwebp* from ${_webp_src_dir}")
+else()
+  message(WARNING "No Release libwebp* found; OpenCV4 imgcodecs may fail (missing lib*.dll)")
+endif()
+
+# ---------------------------------------------------------------------------
+# 3.6) PointCloudProcessor 动态依赖 platform_diag.dll（仓库源码默认 STATIC，但现网
+#      PCP 以 SHARED 链接）。third_party/bin 若已有则上面已拷贝；此处再做兜底与校验。
+# ---------------------------------------------------------------------------
+if(NOT EXISTS "${DST}/platform_diag.dll")
+  set(_pd_candidates "${SRC}/platform_diag.dll")
+  if(SRC_RELEASE)
+    list(APPEND _pd_candidates "${SRC_RELEASE}/platform_diag.dll")
+  endif()
+  get_filename_component(_tp_root "${SRC}" DIRECTORY)
+  get_filename_component(_recon_root "${_tp_root}" DIRECTORY)
+  list(APPEND _pd_candidates
+    "${_recon_root}/point_cloud/Release/platform_diag.dll")
+  set(_pd_found "")
+  foreach(_cand IN LISTS _pd_candidates)
+    if(_cand AND EXISTS "${_cand}")
+      set(_pd_found "${_cand}")
+      break()
+    endif()
+  endforeach()
+  if(_pd_found)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_pd_found}" "${DST}/platform_diag.dll")
+    message(STATUS "Deployed platform_diag.dll from ${_pd_found}")
+  else()
+    message(WARNING
+      "platform_diag.dll missing beside mock_algo_service; "
+      "PointCloudProcessor.dll will fail to load (0xC0000135). "
+      "Build SHARED platform_diag into ${SRC} or place the DLL next to the exe.")
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
