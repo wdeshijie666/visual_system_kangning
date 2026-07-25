@@ -1,9 +1,11 @@
 /**
  * @file sequence_engine.cpp
  * @brief 产线编排实现。流程说明见 docs/框架流程通路.md。
+ * 掉线快应答 / 工位门禁 / 异步重连见 sequence_engine.h。
  */
 #include "visual/sequence_engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -118,13 +120,44 @@ CycleJobQueue<SequenceEngine::PendingCycle>& SequenceEngine::CycleQueueFor(Stati
   return shm::ToShmChannel(station) == shm::ShmChannelId::kR09 ? cycle_queue_r09_ : cycle_queue_r05_;
 }
 
+FaultBreaker& SequenceEngine::CaptureBreakerFor(StationId station) {
+  return shm::ToShmChannel(station) == shm::ShmChannelId::kR09 ? capture_breaker_r09_
+                                                               : capture_breaker_r05_;
+}
+
+bool SequenceEngine::IsStationCameraReady(StationId station) const {
+  return shm::ToShmChannel(station) == shm::ShmChannelId::kR09 ? camera_ready_r09_.load()
+                                                               : camera_ready_r05_.load();
+}
+
+void SequenceEngine::SetStationCameraReady(StationId station, bool ready) {
+  if (shm::ToShmChannel(station) == shm::ShmChannelId::kR09) {
+    camera_ready_r09_.store(ready);
+  } else {
+    camera_ready_r05_.store(ready);
+  }
+}
+
 void SequenceEngine::NotifyQueuesStop() {
   cycle_queue_r05_.NotifyAll();
   cycle_queue_r09_.NotifyAll();
 }
 
 void SequenceEngine::RegisterCamera(const std::string& id, CameraPtr camera) {
+  const bool connected = camera && camera->IsConnected();
   cameras_[id] = std::move(camera);
+
+  // 按 devices.json 工位初始化门禁，避免启动后短窗误入队
+  const auto& devices = AppContext::Instance().Devices();
+  auto dit = devices.find(id);
+  StationId sid = StationId::kR05;
+  if (dit != devices.end() &&
+      (dit->second.station == "r09" || dit->second.station == "R09")) {
+    sid = StationId::kR09;
+  }
+  if (!connected) {
+    SetStationCameraReady(sid, false);
+  }
   StartDeviceHealthMonitor();
 }
 
@@ -145,6 +178,10 @@ void SequenceEngine::DisconnectAllCameras() {
     }
   }
   cameras_.clear();
+  camera_ready_r05_.store(false);
+  camera_ready_r09_.store(false);
+  std::lock_guard<std::mutex> lk(reconnect_mu_);
+  reconnect_state_.clear();
 }
 
 bool SequenceEngine::TryConnectPlc() {
@@ -175,10 +212,84 @@ bool SequenceEngine::IsPlcConnected() const {
 }
 
 void SequenceEngine::ResetFaultBreakers() {
-  capture_breaker_.Reset();
+  capture_breaker_r05_.Reset();
+  capture_breaker_r09_.Reset();
   algo_breaker_.Reset();
   plc_breaker_.Reset();
-  EventBus::Instance().NotifyLog(QStringLiteral("故障熔断已复位"));
+  EventBus::Instance().NotifyLog(QStringLiteral("故障熔断已复位（相机门禁仍由探活/重连维护）"));
+}
+
+bool SequenceEngine::FastAckPlc(StationId station, const char* reason) {
+  const QString why = QString::fromUtf8(reason ? reason : "相机离线");
+  const QString st_name =
+      station == StationId::kR09 ? QStringLiteral("R09") : QStringLiteral("R05");
+
+  AlarmService::Instance().Raise(AlarmLevel::kWarning, QStringLiteral("Camera"),
+                                 QStringLiteral("工位%1 %2，已快应答 PLC（全 NG + 完成位）")
+                                     .arg(st_name)
+                                     .arg(why));
+  EventBus::Instance().NotifyLog(
+      LogSeverity::kWarning,
+      QStringLiteral("快应答 PLC 工位=%1 原因=%2（不跑采图/算法）").arg(st_name).arg(why));
+
+  EventBus::Instance().NotifyCycleStarted(station);
+  const LogResultBatch ng_logs = MakeAllNgLogs();
+  bool plc_ok = true;
+  if (plc_) {
+    for (StationId target : CompletedStations(station, /*single_station_only=*/false)) {
+      if (!plc_->WriteLogResults(target, ng_logs)) {
+        plc_ok = false;
+      }
+      if (!plc_->WriteSequenceCompleted(target, true)) {
+        plc_ok = false;
+      }
+    }
+  } else {
+    plc_ok = false;
+  }
+
+  CycleResultEvent ev;
+  ev.station = station;
+  ev.logs = ng_logs;
+  ev.plc_ok = plc_ok;
+  ev.algo_ok = false;
+  EventBus::Instance().NotifyCycleCompleted(ev);
+  return plc_ok;
+}
+
+void SequenceEngine::HandleProductionTrigger(StationId station, const StationConfig& cfg) {
+  if (!cfg.enabled) {
+    return;
+  }
+  // 门禁 Offline / 该通道采图已隔离：直接回完成，不入队
+  if (!IsStationCameraReady(station) || CaptureBreakerFor(station).IsTripped()) {
+    if (CaptureBreakerFor(station).IsTripped() && IsStationCameraReady(station)) {
+      SetStationCameraReady(station, false);
+    }
+    FastAckPlc(station, CaptureBreakerFor(station).IsTripped() ? "采图通道已隔离"
+                                                               : "相机门禁 Offline");
+    EventBus::Instance().NotifyTrigger(station);
+    return;
+  }
+
+  PendingCycle job;
+  job.station = station;
+  job.cfg = cfg;
+  job.options.capture_live = true;
+  job.options.write_plc = true;
+  if (!CycleQueueFor(station).Push(std::move(job))) {
+    // 队列满时仍回完成，避免 PLC 死等
+    AlarmService::Instance().Raise(
+        AlarmLevel::kWarning, QStringLiteral("Engine"),
+        QStringLiteral("周期队列已满，改为快应答 station=%1").arg(static_cast<int>(station)));
+    EventBus::Instance().NotifyLog(
+        LogSeverity::kWarning,
+        QStringLiteral("周期队列已满，快应答 PLC（请放慢节拍）"));
+    FastAckPlc(station, "周期队列已满");
+    EventBus::Instance().NotifyTrigger(station);
+  } else {
+    EventBus::Instance().NotifyTrigger(station);
+  }
 }
 
 bool SequenceEngine::Start() {
@@ -316,6 +427,7 @@ void SequenceEngine::CheckDeviceHealth() {
 
   const auto& settings = AppContext::Instance().Settings();
   const auto& devices = AppContext::Instance().Devices();
+  const auto now = std::chrono::steady_clock::now();
 
   for (auto& kv : cameras_) {
     if (!kv.second) {
@@ -331,35 +443,62 @@ void SequenceEngine::CheckDeviceHealth() {
       }
     }
 
-    // 该工位正在跑周期（采图/算法/写 PLC）：不探活、不重连，避免抢相机锁拖慢通路
-    std::unique_lock<std::mutex> cycle_lock(CycleMutexFor(sid), std::try_to_lock);
-    if (!cycle_lock.owns_lock()) {
-      continue;
-    }
-
+    // 仅探活：不抢 cycle_mutex，避免与周期互相堵死
     const CameraProbeResult probe = kv.second->ProbeAlive();
     if (probe == CameraProbeResult::kBusy) {
       continue;
     }
     if (probe == CameraProbeResult::kAlive) {
       EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), true);
+      SetStationCameraReady(sid, true);
+      CaptureBreakerFor(sid).Reset();
+      {
+        std::lock_guard<std::mutex> lk(reconnect_mu_);
+        reconnect_state_[kv.first] = CamReconnectState{};
+      }
       continue;
     }
 
-    // 已确认掉线：先断再连（Connect 内部也会清半开句柄）
+    // 已确认掉线：立刻门禁 Offline，后续 PLC 触发走快应答
     EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), false);
+    SetStationCameraReady(sid, false);
+
+    CamReconnectState st;
+    {
+      std::lock_guard<std::mutex> lk(reconnect_mu_);
+      st = reconnect_state_[kv.first];
+    }
+    if (now < st.next_attempt) {
+      continue;
+    }
+
     EventBus::Instance().NotifyLog(
-        QStringLiteral("相机探活掉线，尝试重连: %1").arg(QString::fromStdString(kv.first)));
+        QStringLiteral("相机探活掉线，异步重连: %1").arg(QString::fromStdString(kv.first)));
+    // 不持有 cycle_mutex：Connect 阻塞时健康工位仍可跑周期
     kv.second->Disconnect();
     const bool ok = kv.second->Connect();
     EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.first), ok);
-    if (!ok) {
+    if (ok) {
+      SetStationCameraReady(sid, true);
+      CaptureBreakerFor(sid).Reset();
+      {
+        std::lock_guard<std::mutex> lk(reconnect_mu_);
+        reconnect_state_[kv.first] = CamReconnectState{};
+      }
+      EventBus::Instance().NotifyLog(
+          QStringLiteral("相机已重连: %1").arg(QString::fromStdString(kv.first)));
+    } else {
       AlarmService::Instance().Raise(
           AlarmLevel::kCritical, QStringLiteral("Camera"),
           QStringLiteral("相机掉线且重连失败: %1").arg(QString::fromStdString(kv.first)));
-    } else {
-      EventBus::Instance().NotifyLog(
-          QStringLiteral("相机已重连: %1").arg(QString::fromStdString(kv.first)));
+      const int streak = st.fail_streak + 1;
+      // 退避：2s、4s、8s…封顶 30s，减轻 SDK 刷死
+      const int delay_sec = std::min(30, 2 << std::min(streak, 4));
+      CamReconnectState next;
+      next.fail_streak = streak;
+      next.next_attempt = now + std::chrono::seconds(delay_sec);
+      std::lock_guard<std::mutex> lk(reconnect_mu_);
+      reconnect_state_[kv.first] = next;
     }
   }
 
@@ -376,20 +515,28 @@ void SequenceEngine::CheckDeviceHealth() {
   }
 }
 
-void SequenceEngine::OnCycleOutcome(bool capture_ok, bool algo_ok, bool plc_ok,
+void SequenceEngine::OnCycleOutcome(StationId station, bool capture_ok, bool algo_ok, bool plc_ok,
                                     const std::string& cycle_id, bool update_fault_breaker) {
   if (!update_fault_breaker) {
     return;
   }
   const QString cid = QString::fromStdString(cycle_id);
+  auto& cap_br = CaptureBreakerFor(station);
   if (capture_ok) {
-    capture_breaker_.OnSuccess();
-  } else if (capture_breaker_.OnFailure()) {
-    AlarmService::Instance().Raise(AlarmLevel::kCritical, QStringLiteral("Camera"),
-                                   QStringLiteral("采图连续失败，触发熔断"), cid);
-    // 仅停接新触发；join 由 UI 线程 Stop()/再次 Start() 完成，避免在本 worker 内 join 自己
-    running_.store(false);
-    NotifyQueuesStop();
+    cap_br.OnSuccess();
+    SetStationCameraReady(station, true);
+  } else if (cap_br.OnFailure()) {
+    // 仅隔离本通道：门禁 Offline，后续快应答；不停整线
+    SetStationCameraReady(station, false);
+    AlarmService::Instance().Raise(
+        AlarmLevel::kCritical, QStringLiteral("Camera"),
+        QStringLiteral("采图连续失败，工位通道已隔离（快应答），其它工位继续"), cid);
+    EventBus::Instance().NotifyLog(
+        LogSeverity::kWarning,
+        QStringLiteral("采图通道隔离 station=%1（不停产线）").arg(static_cast<int>(station)));
+  } else {
+    // 首次/未满阈值失败：立刻 Offline，避免下一拍再进长 Capture
+    SetStationCameraReady(station, false);
   }
 
   if (algo_ok) {
@@ -417,8 +564,8 @@ void SequenceEngine::PollLoop() {
   bool last_r09 = false;
 
   while (running_.load()) {
-    // 熔断后停止接新触发
-    if (capture_breaker_.IsTripped() || algo_breaker_.IsTripped() || plc_breaker_.IsTripped()) {
+    // 算法/PLC 全局熔断仍停接新触发；相机失败不再停整线
+    if (algo_breaker_.IsTripped() || plc_breaker_.IsTripped()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       continue;
     }
@@ -451,32 +598,11 @@ void SequenceEngine::PollLoop() {
     last_r07 = r07;
     last_r09 = r09;
 
-    auto enqueue = [this](StationId station, const StationConfig& cfg) {
-      if (!cfg.enabled) {
-        return;
-      }
-      PendingCycle job;
-      job.station = station;
-      job.cfg = cfg;
-      job.options.capture_live = true;
-      job.options.write_plc = true;
-      // 各工位独立队列：同 tick 双沿可同时入队，互不丢触发
-      if (!CycleQueueFor(station).Push(std::move(job))) {
-        AlarmService::Instance().Raise(
-            AlarmLevel::kWarning, QStringLiteral("Engine"),
-            QStringLiteral("周期队列已满，触发被丢弃 station=%1").arg(static_cast<int>(station)));
-        EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
-            QStringLiteral("周期队列已满，触发已丢弃（请放慢节拍或保持触发直至完成）"));
-      } else {
-        EventBus::Instance().NotifyTrigger(station);
-      }
-    };
-
     if (edge_r09) {
-      enqueue(StationId::kR09, AppContext::Instance().Settings().station_r09);
+      HandleProductionTrigger(StationId::kR09, AppContext::Instance().Settings().station_r09);
     }
     if (edge_r05 || edge_r07) {
-      enqueue(StationId::kR05, AppContext::Instance().Settings().station_r05);
+      HandleProductionTrigger(StationId::kR05, AppContext::Instance().Settings().station_r05);
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -512,6 +638,14 @@ void SequenceEngine::CycleWorkerLoopR09() {
 bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options) {
   // 同工位互斥：在线 Worker 与 UI 离线/回放不会同时采同一相机、踩同一 SHM
   std::lock_guard<std::mutex> cycle_lock(CycleMutexFor(station));
+
+  // 入队后才掉线：产线路径改为快应答，避免再进长 Capture
+  if (options.capture_live && options.write_plc && !options.single_station_only &&
+      !IsStationCameraReady(station)) {
+    FastAckPlc(station, "入队后相机门禁 Offline");
+    return false;
+  }
+
   EventBus::Instance().NotifyCycleStarted(station);
 
   const auto& settings = AppContext::Instance().Settings();
@@ -645,8 +779,9 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     }
   }
 
-  // P0-5：采图失败不调算法，直接 NG 写回 PLC
+  // P0-5：采图失败不调算法，直接 NG 写回 PLC；并置门禁 Offline 供后续快应答
   if (options.capture_live && !capture_ok) {
+    SetStationCameraReady(station, false);
     AlarmService::Instance().Raise(AlarmLevel::kWarning, QStringLiteral("Camera"),
                                    QStringLiteral("采图失败，本周期跳过算法"),
                                    QString::fromStdString(cycle_id));
@@ -683,7 +818,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     EventBus::Instance().NotifyLog(LogSeverity::kWarning, 
         QStringLiteral("周期中止：采图失败 工位=%1")
             .arg(station == StationId::kR09 ? QStringLiteral("R09") : QStringLiteral("R05")));
-    OnCycleOutcome(false, false, plc_ok, cycle_id, options.update_fault_breaker);
+    OnCycleOutcome(station, false, false, plc_ok, cycle_id, options.update_fault_breaker);
     return false;
   }
 
@@ -821,7 +956,7 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
           .arg(options.write_plc ? (plc_ok ? QStringLiteral("成功") : QStringLiteral("失败"))
                                  : QStringLiteral("跳过")));
 
-  OnCycleOutcome(capture_ok, algo_ok, options.write_plc ? plc_ok : true, cycle_id,
+  OnCycleOutcome(station, capture_ok, algo_ok, options.write_plc ? plc_ok : true, cycle_id,
                  options.update_fault_breaker);
   // 手动单通路：以采图+算法为准，PLC 写回失败不判定整周期失败
   if (options.single_station_only) {

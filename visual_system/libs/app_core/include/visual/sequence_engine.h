@@ -4,6 +4,8 @@
  *
  * 双工位并行：单 Poll 线程 + R05/R09 双任务队列 + 双执行线程；
  * 同工位互斥，异工位可同时 RunCycle。
+ * 相机掉线：工位门禁 Offline 时 PLC 触发走快应答（全 NG + 完成位），不入队跑周期；
+ * 健康工位不受影响；重连在巡检线程异步进行，不占用 cycle_mutex。
  */
 #pragma once
 
@@ -12,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 #include "visual/app_context.h"
@@ -93,6 +96,12 @@ class SequenceEngine {
     CycleOptions options;
   };
 
+  /** 相机重连退避状态（按相机 id）。 */
+  struct CamReconnectState {
+    std::chrono::steady_clock::time_point next_attempt{};
+    int fail_streak = 0;
+  };
+
   /** 仅做 PLC 边沿检测；设备探活由独立 health 线程负责。 */
   void PollLoop();
   /** R05 通道周期消费者。 */
@@ -105,16 +114,29 @@ class SequenceEngine {
   IAlgoService* ResolveAlgo(StationId station);
   std::mutex& CycleMutexFor(StationId station);
   CycleJobQueue<PendingCycle>& CycleQueueFor(StationId station);
+  FaultBreaker& CaptureBreakerFor(StationId station);
+  /** R05/R07 共用 R05 通道门禁；R09 独立。 */
+  bool IsStationCameraReady(StationId station) const;
+  void SetStationCameraReady(StationId station, bool ready);
 
-  /** 相机/PLC 巡检：探活确认掉线后再重连；工位周期进行中则跳过该工位。 */
+  /**
+   * 相机离线快应答：写全 NG + SequenceCompleted，不采图、不跑算法。
+   * 供 Poll 线程与 Worker（入队后掉线）调用。
+   */
+  bool FastAckPlc(StationId station, const char* reason);
+
+  /** 处理产线触发：门禁 Offline 则快应答，否则入队。 */
+  void HandleProductionTrigger(StationId station, const StationConfig& cfg);
+
+  /** 相机/PLC 巡检：探活更新门禁；掉线异步重连（不持 cycle_mutex）。 */
   void CheckDeviceHealth();
   /** 注册相机后启动；独立于产线 Start/Stop，未开产线也能空闲恢复。 */
   void StartDeviceHealthMonitor();
   void StopDeviceHealthMonitor();
   void DeviceHealthLoop();
 
-  void OnCycleOutcome(bool capture_ok, bool algo_ok, bool plc_ok, const std::string& cycle_id,
-                      bool update_fault_breaker = true);
+  void OnCycleOutcome(StationId station, bool capture_ok, bool algo_ok, bool plc_ok,
+                      const std::string& cycle_id, bool update_fault_breaker = true);
   void NotifyQueuesStop();
   /** join poll/cycle 线程（可在 UI 线程调用；禁止在 cycle worker 内调用）。 */
   void JoinWorkerThreads();
@@ -136,14 +158,23 @@ class SequenceEngine {
   std::mutex cycle_mutex_r05_;
   std::mutex cycle_mutex_r09_;
 
-  FaultBreaker capture_breaker_{3};
+  /** 采图熔断按通道隔离；触发后该工位走快应答，不停整线。 */
+  FaultBreaker capture_breaker_r05_{3};
+  FaultBreaker capture_breaker_r09_{3};
   FaultBreaker algo_breaker_{3};
   FaultBreaker plc_breaker_{3};
+
+  /** 工位相机门禁：true=可入队跑周期，false=PLC 触发快应答。 */
+  std::atomic<bool> camera_ready_r05_{true};
+  std::atomic<bool> camera_ready_r09_{true};
 
   std::atomic<bool> health_monitor_enabled_{false};
   std::thread health_thread_;
   /** 串行化巡检，避免与退出 Disconnect 交错。 */
   std::mutex health_mutex_;
+  /** 重连退避（仅 health 线程访问，仍用锁防与 Stop 交错写 map）。 */
+  std::mutex reconnect_mu_;
+  std::map<std::string, CamReconnectState> reconnect_state_;
 };
 
 }  // namespace visual
