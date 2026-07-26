@@ -17,8 +17,11 @@
 #include <QMessageBox>
 #include <QThread>
 
+#include <filesystem>
+
 #include "main_window.h"
 #include "algo_process_manager.h"
+#include "camera_recipe_paths.h"
 #include "startup_splash.h"
 #include "visual/alarm_service.h"
 #include "visual/app_context.h"
@@ -284,6 +287,33 @@ int main(int argc, char* argv[]) {
             .arg(QString::fromStdString(kv.second.serial))
             .arg(ok ? QStringLiteral("成功") : QStringLiteral("失败"))
             .arg(use_stub_serial || simulation_mode ? QStringLiteral("（仿真）") : QString()));
+
+    // 连接成功后按序列号加载默认配方：{exe}/camera_parmas/{sn}.json
+    if (ok) {
+      const auto recipe_path = visual::DefaultRecipePathForSerial(kv.second.serial);
+      const QString sn = QString::fromStdString(kv.second.serial);
+      if (recipe_path.empty()) {
+        visual::EventBus::Instance().NotifyLog(
+            visual::LogSeverity::kWarning,
+            QStringLiteral("默认配方跳过: 相机 %1 无序列号")
+                .arg(QString::fromStdString(kv.second.id)));
+      } else {
+        const QString path_q = QString::fromStdString(recipe_path.string());
+        if (!std::filesystem::exists(recipe_path)) {
+          visual::EventBus::Instance().NotifyLog(
+              visual::LogSeverity::kWarning,
+              QStringLiteral("默认配方未找到: 序列号=%1 路径=%2（跳过）")
+                  .arg(sn, path_q));
+        } else if (cam->LoadRecipeFile(recipe_path.string())) {
+          visual::EventBus::Instance().NotifyLog(
+              QStringLiteral("默认配方加载成功: 序列号=%1 路径=%2").arg(sn, path_q));
+        } else {
+          visual::EventBus::Instance().NotifyLog(
+              visual::LogSeverity::kWarning,
+              QStringLiteral("默认配方加载失败: 序列号=%1 路径=%2").arg(sn, path_q));
+        }
+      }
+    }
   }
 
   SplashStatus(&splash, QStringLiteral("正在加载主界面"));

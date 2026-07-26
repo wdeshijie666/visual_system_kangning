@@ -9,6 +9,7 @@ set(_vs_app_sources
   src/station_result_widget.cpp
   src/device_status_widget.cpp
   src/camera_manager_widget.cpp
+  src/camera_recipe_paths.cpp
   src/viewport_widget.cpp
   src/offline_test_widget.cpp
 )
@@ -20,6 +21,7 @@ set(_vs_app_headers
   include/station_result_widget.h
   include/device_status_widget.h
   include/camera_manager_widget.h
+  include/camera_recipe_paths.h
   include/viewport_widget.h
   include/offline_test_widget.h
 )
@@ -64,6 +66,8 @@ add_custom_command(TARGET VisualSystem POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/../../config"
     "$<TARGET_FILE_DIR:VisualSystem>/config"
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+    "$<TARGET_FILE_DIR:VisualSystem>/camera_parmas"
   COMMAND ${CMAKE_COMMAND} -E make_directory
     "$<TARGET_FILE_DIR:VisualSystem>/alg_program"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different

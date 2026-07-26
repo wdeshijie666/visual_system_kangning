@@ -28,6 +28,7 @@
 #include <QVBoxLayout>
 
 #include <thread>
+#include <vector>
 
 #include "camera_manager_widget.h"
 #include "device_status_widget.h"
@@ -344,37 +345,37 @@ void MainWindow::BindRecipeImportHandler(CameraManagerWidget* camera_manager) {
   if (camera_manager == nullptr) {
     return;
   }
-  camera_manager->SetImportRecipeHandler([this, camera_manager](const QString& path) {
-    if (!engine_) {
-      return;
-    }
-    const std::string utf8_path = path.toUtf8().constData();
-    const auto& devices = visual::AppContext::Instance().Devices();
-    int loaded = 0;
-    visual::RecipeParamList params;
-    for (const auto& kv : devices) {
-      auto cam = engine_->GetCamera(kv.second.id);
-      visual::RecipeParamList one;
-      if (cam && cam->LoadRecipeFile(utf8_path, &one)) {
-        ++loaded;
-        if (params.empty() && !one.empty()) {
-          params = std::move(one);
+  // 仅对下拉框选中的那一台相机下发配方，避免多工位互相覆盖。
+  camera_manager->SetImportRecipeHandler(
+      [this, camera_manager](const QString& camera_id, const QString& path) {
+        if (!engine_ || camera_id.isEmpty()) {
+          return;
         }
-      }
-    }
-    if (loaded > 0) {
-      if (!params.empty()) {
-        camera_manager->SetRecipeParams(params);
-      }
-      visual::EventBus::Instance().NotifyLog(
-          QStringLiteral("配方导入成功: %1 → %2 台相机").arg(path).arg(loaded));
-      statusBar()->showMessage(tr("配方导入成功"), 3000);
-    } else {
-      visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
-          QStringLiteral("配方导入失败: %1（请确认相机已连接）").arg(path));
-      statusBar()->showMessage(tr("配方导入失败"), 5000);
-    }
-  });
+        const std::string id = camera_id.toStdString();
+        auto cam = engine_->GetCamera(id);
+        if (!cam || !cam->IsConnected()) {
+          visual::EventBus::Instance().NotifyLog(
+              visual::LogSeverity::kWarning,
+              QStringLiteral("配方导入失败: 相机 %1 未连接").arg(camera_id));
+          statusBar()->showMessage(tr("配方导入失败：相机未连接"), 5000);
+          return;
+        }
+        const std::string utf8_path = path.toUtf8().constData();
+        visual::RecipeParamList params;
+        if (!cam->LoadRecipeFile(utf8_path, &params)) {
+          visual::EventBus::Instance().NotifyLog(
+              visual::LogSeverity::kWarning,
+              QStringLiteral("配方导入失败: %1 → 相机 %2").arg(path, camera_id));
+          statusBar()->showMessage(tr("配方导入失败"), 5000);
+          return;
+        }
+        if (!params.empty()) {
+          camera_manager->SetRecipeParams(params);
+        }
+        visual::EventBus::Instance().NotifyLog(
+            QStringLiteral("配方导入成功: %1 → 相机 %2").arg(path, camera_id));
+        statusBar()->showMessage(tr("配方导入成功"), 3000);
+      });
 }
 
 void MainWindow::OnOpen2DCameraImport() {
@@ -383,6 +384,19 @@ void MainWindow::OnOpen2DCameraImport() {
   dlg.resize(520, 700);
   auto* layout = new QVBoxLayout(&dlg);
   auto* camera_manager = new CameraManagerWidget(&dlg);
+  // 按序列号列出全部已配置相机，供导入时点选目标。
+  std::vector<CameraChoice> choices;
+  for (const auto& kv : visual::AppContext::Instance().Devices()) {
+    CameraChoice c;
+    c.camera_id = QString::fromStdString(kv.second.id);
+    c.serial = QString::fromStdString(kv.second.serial);
+    if (engine_) {
+      auto cam = engine_->GetCamera(kv.second.id);
+      c.connected = cam && cam->IsConnected();
+    }
+    choices.push_back(std::move(c));
+  }
+  camera_manager->SetCameraChoices(choices);
   BindRecipeImportHandler(camera_manager);
   layout->addWidget(camera_manager, 1);
   auto* close_btn = new QPushButton(tr("关闭"), &dlg);
@@ -613,28 +627,35 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
   };
 
   const auto& settings = visual::AppContext::Instance().Settings();
-  if (engine_ != nullptr) {
-    for (const auto& kv : visual::AppContext::Instance().Devices()) {
-      const bool station_enabled =
-          (kv.second.station == "r09" || kv.second.station == "R09")
-              ? settings.station_r09.enabled
-              : settings.station_r05.enabled;
-      if (!station_enabled) {
-        continue;
-      }
-      auto cam = engine_->GetCamera(kv.second.id);
-      const bool connected = cam && cam->IsConnected();
-      if (device_status_ != nullptr) {
-        device_status_->SetCameraStatus(QString::fromStdString(kv.second.id), connected);
-      }
-      if (!connected) {
-        set_reason(tr("相机未连接(%1)").arg(QString::fromStdString(kv.second.id)));
-        return false;
-      }
-    }
-  } else {
+  if (engine_ == nullptr) {
     set_reason(tr("编排引擎未就绪"));
     return false;
+  }
+
+  // 刷新相机状态；允许部分 Offline（掉线工位产线内走快应答），不阻断启动
+  QStringList offline_cams;
+  for (const auto& kv : visual::AppContext::Instance().Devices()) {
+    const bool station_enabled =
+        (kv.second.station == "r09" || kv.second.station == "R09")
+            ? settings.station_r09.enabled
+            : settings.station_r05.enabled;
+    if (!station_enabled) {
+      continue;
+    }
+    auto cam = engine_->GetCamera(kv.second.id);
+    const bool connected = cam && cam->IsConnected();
+    if (device_status_ != nullptr) {
+      device_status_->SetCameraStatus(QString::fromStdString(kv.second.id), connected);
+    }
+    if (!connected) {
+      offline_cams << QString::fromStdString(kv.second.id);
+    }
+  }
+  if (!offline_cams.isEmpty()) {
+    visual::EventBus::Instance().NotifyLog(
+        visual::LogSeverity::kWarning,
+        QStringLiteral("部分相机离线仍启动产线（离线工位快应答）: %1")
+            .arg(offline_cams.join(QStringLiteral(","))));
   }
 
   const bool require_algo_process = visual::AppContext::Instance().Settings().use_shm_algo;
@@ -675,17 +696,20 @@ void MainWindow::ApplyProductionStartInterlock() {
 
   QStringList faults;
   if (device_status_ != nullptr) {
-    if (!device_status_->AreCamerasOk()) {
-      faults << tr("相机未连接");
-    }
+    // 不再要求全部相机在线：Offline 工位由引擎快应答，健康工位照常跑
     if (visual::AppContext::Instance().Settings().use_shm_algo && !device_status_->IsAlgoOk()) {
       faults << tr("算法服务异常");
     }
   }
   const bool ready = faults.isEmpty();
   start_engine_button_->setEnabled(ready);
-  start_engine_button_->setToolTip(
-      ready ? QString() : tr("设备状态异常，无法启动：%1").arg(faults.join(QStringLiteral("；"))));
+  QString tip;
+  if (!ready) {
+    tip = tr("设备状态异常，无法启动：%1").arg(faults.join(QStringLiteral("；")));
+  } else if (device_status_ != nullptr && !device_status_->AreCamerasOk()) {
+    tip = tr("部分相机离线：仍可启动，离线工位将快应答 PLC");
+  }
+  start_engine_button_->setToolTip(tip);
 }
 
 void MainWindow::UpdateEngineControlState(bool running) {
