@@ -1,6 +1,6 @@
 /**
  * @file algo_input_converter.cpp
- * @brief 算法侧输入校验；可选将深度/点云落盘便于排查。
+ * @brief 算法侧输入校验；在线可选落盘；离线按会话目录定位深度/灰度文件。
  */
 #include "algo_input_converter.h"
 
@@ -77,7 +77,98 @@ bool WriteDepthRawFile(const std::filesystem::path& path, const std::uint8_t* da
   return out.good();
 }
 
+/**
+ * 按落盘约定扫描会话目录：token 形如 "_depth." / "_gray."。
+ * 优先文件名同时含工位标签与相机 id；否则同工位首个命中。
+ */
+bool FindSessionFileByToken(const std::filesystem::path& session_dir, const std::string& station_tag,
+                            const std::string& camera_id, const char* token,
+                            std::filesystem::path* out_path, std::string* error,
+                            bool required) {
+  if (out_path == nullptr) {
+    if (error != nullptr) {
+      *error = "输出路径为空";
+    }
+    return false;
+  }
+  out_path->clear();
+  if (session_dir.empty() || !std::filesystem::exists(session_dir)) {
+    if (required && error != nullptr) {
+      *error = "回放目录不存在: " + session_dir.string();
+    }
+    return false;
+  }
+
+  std::filesystem::path fallback;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(session_dir, ec)) {
+    if (ec || !entry.is_regular_file()) {
+      continue;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.find(token) == std::string::npos) {
+      continue;
+    }
+    if (!station_tag.empty() && name.find("_" + station_tag + "_") == std::string::npos) {
+      continue;
+    }
+    if (!camera_id.empty() && name.find("_" + camera_id + "_") != std::string::npos) {
+      *out_path = entry.path();
+      return true;
+    }
+    if (fallback.empty()) {
+      fallback = entry.path();
+    }
+  }
+
+  if (!fallback.empty()) {
+    *out_path = fallback;
+    return true;
+  }
+  if (required && error != nullptr) {
+    *error = std::string("回放目录无深度图(") + token + "): " + session_dir.string();
+  }
+  return false;
+}
+
+std::string FirstCameraIdFromHeader(const visual::shm::ShmHeader* header) {
+  if (header == nullptr) {
+    return {};
+  }
+  for (std::int32_t i = 0; i < header->camera_count; ++i) {
+    if (header->cameras[i].camera_serial[0] != '\0') {
+      return header->cameras[i].camera_serial;
+    }
+  }
+  return {};
+}
+
 }  // namespace
+
+std::string StationTagFromShmId(std::int32_t station_id) {
+  if (station_id == static_cast<std::int32_t>(visual::StationId::kR09)) {
+    return "R09";
+  }
+  if (station_id == static_cast<std::int32_t>(visual::StationId::kR05) ||
+      station_id == static_cast<std::int32_t>(visual::StationId::kR07)) {
+    return "R05";
+  }
+  return {};
+}
+
+bool FindDepthFileInSession(const std::filesystem::path& session_dir,
+                            const std::string& station_tag, const std::string& camera_id,
+                            std::filesystem::path* out_path, std::string* error) {
+  return FindSessionFileByToken(session_dir, station_tag, camera_id, "_depth.", out_path, error,
+                                /*required=*/true);
+}
+
+bool FindGrayFileInSession(const std::filesystem::path& session_dir,
+                           const std::string& station_tag, const std::string& camera_id,
+                           std::filesystem::path* out_path) {
+  return FindSessionFileByToken(session_dir, station_tag, camera_id, "_gray.", out_path, nullptr,
+                                /*required=*/false);
+}
 
 bool PrepareAlgoInputFromShm(const visual::shm::ShmHeader* header, const std::uint8_t* blob_arena,
                              std::size_t blob_arena_size, const AlgoConfig& config,
@@ -148,7 +239,16 @@ bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string
     return false;
   }
 
-  AlgoDebug(std::string("离线回放目录: ") + header->session_dir);
+  const std::filesystem::path session_dir(header->session_dir);
+  const std::string station_tag = StationTagFromShmId(header->station_id);
+  const std::string camera_id = FirstCameraIdFromHeader(header);
+
+  std::filesystem::path depth_path;
+  if (!FindDepthFileInSession(session_dir, station_tag, camera_id, &depth_path, error)) {
+    return false;
+  }
+
+  AlgoInfo(std::string("离线回放目录: ") + header->session_dir + " 深度=" + depth_path.string());
   return true;
 }
 

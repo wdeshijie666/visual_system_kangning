@@ -25,6 +25,7 @@ struct PointCloudProcessorSlot {
 
 /**
  * 从 SHM 读取第一路有效深度并跑圆柱拟合；开启 transferGray 时写回可视化图。
+ * 若 input_mode=kOfflinePath，则从 session_dir 读 `_depth.*`（毫米），不读 SHM blob。
  * @param slot 非空时使用该通道引擎槽；空则本请求临时构造。
  * @return false 表示输入无效或算法失败；无有效圆柱仍返回 true（logs 为 NG）。
  */

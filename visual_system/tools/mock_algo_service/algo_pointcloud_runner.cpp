@@ -1,8 +1,8 @@
 /**
  * @file algo_pointcloud_runner.cpp
- * @brief 点云算法：SHM/临时 TIFF 深度 → PointCloudProcessor → 5 条结果。
+ * @brief 点云算法：SHM / 离线 session 深度 / 临时 TIFF → PointCloudProcessor → 5 条结果。
  *
- * SHM 深度单位为米，固定换算为毫米后再计算；临时 TIFF 已是毫米。
+ * SHM 深度单位为米，固定换算为毫米后再计算；磁盘 TIFF/PGM（含历史回放）已是毫米。
  */
 #include "algo_pointcloud_runner.h"
 
@@ -23,6 +23,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 
+#include "algo_input_converter.h"
 #include "algo_log.h"
 #include "visual/algo_shm_codec.h"
 #include "visual/capture_data_format.h"
@@ -30,29 +31,33 @@
 namespace algo {
 namespace {
 
+/**
+ * 从磁盘读深度图（TIFF/PGM 等，OpenCV 可读格式）。
+ * 落盘约定为毫米，调用方勿再按 SHM「米→毫米」换算。
+ */
 bool LoadDepthTiffFile(const std::filesystem::path& path, cv::Mat* out, std::string* error) {
   if (out == nullptr) {
     if (error) {
-      *error = "临时深度图输出为空";
+      *error = "深度图输出为空";
     }
     return false;
   }
   if (!std::filesystem::exists(path)) {
     if (error) {
-      *error = "临时深度图不存在: " + path.string();
+      *error = "深度图不存在: " + path.string();
     }
     return false;
   }
   cv::Mat img = cv::imread(path.string(), cv::IMREAD_UNCHANGED);
   if (img.empty()) {
     if (error) {
-      *error = "临时深度图读取失败: " + path.string();
+      *error = "深度图读取失败: " + path.string();
     }
     return false;
   }
   if (img.channels() != 1) {
     if (error) {
-      *error = "临时深度图须为单通道";
+      *error = "深度图须为单通道";
     }
     return false;
   }
@@ -62,11 +67,43 @@ bool LoadDepthTiffFile(const std::filesystem::path& path, cv::Mat* out, std::str
     *out = img;
   } else {
     if (error) {
-      *error = "临时深度图格式不支持";
+      *error = "深度图格式不支持";
     }
     return false;
   }
   return true;
+}
+
+/** 会话目录灰度（通常为 Mono8 PGM）；失败返回 false，不写 error。 */
+bool LoadGrayImageFile(const std::filesystem::path& path, cv::Mat* out) {
+  if (out == nullptr || path.empty() || !std::filesystem::exists(path)) {
+    return false;
+  }
+  cv::Mat img = cv::imread(path.string(), cv::IMREAD_UNCHANGED);
+  if (img.empty()) {
+    return false;
+  }
+  if (img.type() == CV_8UC1) {
+    *out = img;
+    return true;
+  }
+  if (img.channels() == 1) {
+    img.convertTo(*out, CV_8UC1);
+    return !out->empty();
+  }
+  return false;
+}
+
+std::string FirstCameraIdFromHeader(const visual::shm::ShmHeader* header) {
+  if (header == nullptr) {
+    return {};
+  }
+  for (std::int32_t i = 0; i < header->camera_count; ++i) {
+    if (header->cameras[i].camera_serial[0] != '\0') {
+      return header->cameras[i].camera_serial;
+    }
+  }
+  return {};
 }
 
 /** SHM：米 → 毫米。uint16 仿真数据已是毫米。 */
@@ -358,15 +395,41 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
   }
 
   cv::Mat depth;
+  cv::Mat offline_gray;  // 仅 kOfflinePath 预读；在线仍从 SHM 取灰
+  const bool offline_path =
+      header->input_mode == static_cast<std::uint32_t>(visual::AlgoInputMode::kOfflinePath);
+
   if (!config.temp_force_depth_tiff.empty()) {
+    // 调试覆盖：任意模式优先，且文件已是毫米
     if (!LoadDepthTiffFile(config.temp_force_depth_tiff, &depth, error)) {
       return false;
     }
     AlgoDebug("使用临时深度图: " + config.temp_force_depth_tiff);
+  } else if (offline_path) {
+    // 历史回放：只读磁盘，不走 SHM blob，避免影响在线 PickFirstDepth 通路
+    const std::filesystem::path session_dir(header->session_dir);
+    const std::string station_tag = StationTagFromShmId(header->station_id);
+    const std::string camera_id = FirstCameraIdFromHeader(header);
+    std::filesystem::path depth_path;
+    if (!FindDepthFileInSession(session_dir, station_tag, camera_id, &depth_path, error)) {
+      return false;
+    }
+    if (!LoadDepthTiffFile(depth_path, &depth, error)) {
+      return false;
+    }
+    AlgoInfo("离线深度已加载: " + depth_path.string());
+
+    std::filesystem::path gray_path;
+    if (FindGrayFileInSession(session_dir, station_tag, camera_id, &gray_path)) {
+      if (LoadGrayImageFile(gray_path, &offline_gray)) {
+        AlgoDebug("离线灰度已加载: " + gray_path.string());
+      }
+    }
   } else {
     if (!PickFirstDepth(header, blob_arena, &depth, error)) {
       return false;
     }
+    // SHM 浮点深度为米，换算毫米；与落盘 TIFF/PGM 路径刻意分开
     ConvertShmDepthMetersToMm(&depth);
   }
 
@@ -390,7 +453,10 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     const bool want_gray =
         config.transfer_gray ||
         visual::HasTransferFlag(header->transfer_flags, visual::AlgoTransferFlag::kGray);
-    if (want_gray) {
+    if (!offline_gray.empty()) {
+      input_gray = offline_gray;
+      gray_cam_index = 0;
+    } else if (want_gray) {
       gray_cam_index = PickFirstGray(header, blob_arena, &input_gray);
     }
 

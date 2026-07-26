@@ -1,3 +1,7 @@
+/**
+ * @file algo_input_converter.h
+ * @brief 算法侧输入准备：在线 SHM 校验/调试落盘；离线按 session 目录找深度图。
+ */
 #pragma once
 
 #include <filesystem>
@@ -9,7 +13,7 @@
 namespace algo {
 
 /**
- * 将 SHM 中的深度/点云载荷转换为算法内部输入（接口未定，当前为预留桩）。
+ * 将 SHM 中的深度/点云载荷做校验，并按配置可选落盘调试文件。
  * @param config 含 debugSaveDepth / debugSavePointcloud 时写入 exe_dir/data。
  * @param exe_dir 算法程序目录（用于 data/ 落盘）。
  */
@@ -17,7 +21,29 @@ bool PrepareAlgoInputFromShm(const visual::shm::ShmHeader* header, const std::ui
                              std::size_t blob_arena_size, const AlgoConfig& config,
                              const std::filesystem::path& exe_dir, std::string* error);
 
-/** 离线模式：从 session_dir 加载数据（接口未定，当前为预留桩）。 */
+/**
+ * 离线回放：校验 session_dir，并确认目录内存在可读的 `_depth.*` 文件。
+ * 不加载像素；实际读盘在 RunPointCloudFromShm 的 kOfflinePath 分支。
+ */
 bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string* error);
+
+/** station_id（5/9）→ 落盘文件名中的工位标签 R05/R09；未知则空串。 */
+std::string StationTagFromShmId(std::int32_t station_id);
+
+/**
+ * 在会话目录中查找深度图（仅 `_depth.`，不含 ply）。
+ * 优先匹配 station_tag + camera_id；否则回退到同工位任意深度文件。
+ * @return 找到返回 true，并写入 out_path。
+ */
+bool FindDepthFileInSession(const std::filesystem::path& session_dir,
+                            const std::string& station_tag, const std::string& camera_id,
+                            std::filesystem::path* out_path, std::string* error);
+
+/**
+ * 查找同命名规则的灰度图 `_gray.pgm`（可选；找不到不报错，由调用方决定）。
+ */
+bool FindGrayFileInSession(const std::filesystem::path& session_dir,
+                           const std::string& station_tag, const std::string& camera_id,
+                           std::filesystem::path* out_path);
 
 }  // namespace algo
