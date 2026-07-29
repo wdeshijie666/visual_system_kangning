@@ -1,8 +1,9 @@
 /**
  * @file algo_pointcloud_runner.cpp
- * @brief 点云算法：SHM / 离线 session 深度 / 临时 TIFF → PointCloudProcessor → 5 条结果。
+ * @brief 点云算法：SHM / 离线 session 深度 / 临时 TIFF → 按工位配置创建的 PointCloudProcessor → 5 条结果。
  *
  * SHM 深度单位为米，固定换算为毫米后再计算；磁盘 TIFF/PGM（含历史回放）已是毫米。
+ * PointCloudProcessor 配置文件与 topN 取自 algo_config.json 的 channels.r05/r09。
  */
 #include "algo_pointcloud_runner.h"
 
@@ -363,10 +364,10 @@ bool WritePreviewImageToShm(visual::shm::ShmHeader* header, std::uint8_t* blob_a
   return true;
 }
 
-std::filesystem::path ResolvePointCloudConfig(const AlgoConfig& config,
+std::filesystem::path ResolvePointCloudConfig(const PointCloudAlgoOptions& pc,
                                               const std::filesystem::path& exe_dir) {
-  if (!config.point_cloud_config.empty()) {
-    std::filesystem::path p(config.point_cloud_config);
+  if (!pc.point_cloud_config.empty()) {
+    std::filesystem::path p(pc.point_cloud_config);
     if (p.is_absolute()) {
       return p;
     }
@@ -381,7 +382,8 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
                           std::size_t blob_arena_size, const AlgoConfig& config,
                           const std::filesystem::path& exe_dir, visual::shm::ShmLogResult* logs,
                           std::size_t log_count, std::string* error,
-                          PointCloudProcessorSlot* slot) {
+                          PointCloudProcessorSlot* slot,
+                          const PointCloudAlgoOptions* channel_pc) {
   if (logs == nullptr || log_count == 0) {
     if (error) {
       *error = "结果缓冲区无效";
@@ -440,7 +442,18 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     return false;
   }
 
-  const auto cfg_path = ResolvePointCloudConfig(config, exe_dir);
+  // 在线双通道传入 channel_pc；否则按 station_id 回退（离线/兼容）
+  const PointCloudAlgoOptions& pc =
+      channel_pc != nullptr ? *channel_pc
+                            : PointCloudOptionsForStationId(config, header->station_id);
+  if (!pc.use_point_cloud_algo) {
+    if (error) {
+      *error = "本工位未启用点云算法";
+    }
+    return false;
+  }
+
+  const auto cfg_path = ResolvePointCloudConfig(pc, exe_dir);
   PointCloudProcessorPtr owned;
   PointCloudProcessor* proc = nullptr;
 
@@ -521,7 +534,7 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
       proc = owned.get();
     }
 
-    const int top_n = config.point_cloud_top_n > 0 ? config.point_cloud_top_n : 5;
+    const int top_n = pc.point_cloud_top_n > 0 ? pc.point_cloud_top_n : 5;
     cv::Mat draw_image = input_gray;
     if (draw_image.empty()) {
       draw_image = cv::Mat(depth.rows, depth.cols, CV_8UC1, cv::Scalar(0));

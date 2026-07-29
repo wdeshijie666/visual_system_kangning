@@ -31,12 +31,18 @@
     "r05": {
       "enabled": true,
       "shmName": "Local\\VisualSystemAlgo_R05_v6",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v6"
+      "mutexName": "Local\\VisualSystemAlgoMutex_R05_v6",
+      "usePointCloudAlgo": true,
+      "pointCloudConfig": "config.json",
+      "pointCloudTopN": 5
     },
     "r09": {
       "enabled": true,
       "shmName": "Local\\VisualSystemAlgo_R09_v6",
-      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v6"
+      "mutexName": "Local\\VisualSystemAlgoMutex_R09_v6",
+      "usePointCloudAlgo": true,
+      "pointCloudConfig": "config.json",
+      "pointCloudTopN": 5
     }
   }
 }

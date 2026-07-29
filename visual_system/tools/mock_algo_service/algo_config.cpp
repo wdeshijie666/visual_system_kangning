@@ -1,3 +1,7 @@
+/**
+ * @file algo_config.cpp
+ * @brief 加载 algo_config.json；点云参数按 channels.r05/r09 区分，顶层作兼容默认。
+ */
 #include "algo_config.h"
 
 #include <fstream>
@@ -52,14 +56,74 @@ void ParsePipelineSimulation(const nlohmann::json& j, PipelineSimulationOptions*
   }
 }
 
+void NormalizeTopN(PointCloudAlgoOptions* pc) {
+  if (pc == nullptr) {
+    return;
+  }
+  if (pc->point_cloud_top_n < 1) {
+    pc->point_cloud_top_n = 5;
+  }
+}
+
+/** 从 JSON 对象读点云三项；缺省字段保留 defaults。 */
+void ParsePointCloudAlgoOptions(const nlohmann::json& j, const PointCloudAlgoOptions& defaults,
+                                PointCloudAlgoOptions* out) {
+  if (out == nullptr) {
+    return;
+  }
+  *out = defaults;
+  if (!j.is_object()) {
+    NormalizeTopN(out);
+    return;
+  }
+  out->use_point_cloud_algo = j.value("usePointCloudAlgo", defaults.use_point_cloud_algo);
+  out->point_cloud_config = j.value("pointCloudConfig", defaults.point_cloud_config);
+  out->point_cloud_top_n = j.value("pointCloudTopN", defaults.point_cloud_top_n);
+  NormalizeTopN(out);
+}
+
+void ParseChannelObject(const nlohmann::json& c, const PointCloudAlgoOptions& pc_defaults,
+                        AlgoChannelConfig* out) {
+  if (out == nullptr || !c.is_object()) {
+    return;
+  }
+  out->enabled = c.value("enabled", out->enabled);
+  out->shm_name = c.value("shmName", out->shm_name);
+  out->mutex_name = c.value("mutexName", out->mutex_name);
+  ParsePointCloudAlgoOptions(c, pc_defaults, &out->point_cloud);
+}
+
 }  // namespace
 
 std::filesystem::path ResolveConfigPath(const std::filesystem::path& exe_dir, const std::string& configured) {
   return NormalizePath(exe_dir, configured);
 }
 
+const PointCloudAlgoOptions& PointCloudOptionsForChannel(const AlgoConfig& config,
+                                                        visual::shm::ShmChannelId channel) {
+  return channel == visual::shm::ShmChannelId::kR09 ? config.channel_r09.point_cloud
+                                                   : config.channel_r05.point_cloud;
+}
+
+const PointCloudAlgoOptions& PointCloudOptionsForStationId(const AlgoConfig& config,
+                                                          std::int32_t station_id) {
+  if (station_id == static_cast<std::int32_t>(visual::StationId::kR09)) {
+    return config.channel_r09.point_cloud;
+  }
+  return config.channel_r05.point_cloud;
+}
+
+bool AnyChannelUsesPointCloudAlgo(const AlgoConfig& config) {
+  return config.channel_r05.point_cloud.use_point_cloud_algo ||
+         config.channel_r09.point_cloud.use_point_cloud_algo;
+}
+
 AlgoConfig LoadAlgoConfig(const std::filesystem::path& exe_dir) {
   AlgoConfig config;
+  // 两工位先填相同默认，再被 JSON 覆盖
+  config.channel_r05.point_cloud = config.point_cloud_defaults;
+  config.channel_r09.point_cloud = config.point_cloud_defaults;
+
   const auto config_file = exe_dir / "algo_config.json";
   if (!std::filesystem::exists(config_file)) {
     config.offline_replay.data_dir = exe_dir / "offline_data";
@@ -94,27 +158,20 @@ AlgoConfig LoadAlgoConfig(const std::filesystem::path& exe_dir) {
   config.transfer_depth = j.value("transferDepth", config.transfer_depth);
   config.transfer_pointcloud = j.value("transferPointcloud", config.transfer_pointcloud);
   config.transfer_gray = j.value("transferGray", config.transfer_gray);
-  config.use_point_cloud_algo = j.value("usePointCloudAlgo", config.use_point_cloud_algo);
-  config.point_cloud_config = j.value("pointCloudConfig", config.point_cloud_config);
-  config.point_cloud_top_n = j.value("pointCloudTopN", config.point_cloud_top_n);
   config.temp_force_depth_tiff = j.value("tempForceDepthTiff", config.temp_force_depth_tiff);
   config.log_level = ParseLogLevel(j.value("logLevel", std::string("info")));
-  if (config.point_cloud_top_n < 1) {
-    config.point_cloud_top_n = 5;
-  }
+
+  // 顶层三项：旧配置兼容默认值
+  ParsePointCloudAlgoOptions(j, config.point_cloud_defaults, &config.point_cloud_defaults);
+  config.channel_r05.point_cloud = config.point_cloud_defaults;
+  config.channel_r09.point_cloud = config.point_cloud_defaults;
 
   if (j.contains("channels")) {
     if (j["channels"].contains("r05")) {
-      const auto& c = j["channels"]["r05"];
-      config.channel_r05.enabled = c.value("enabled", true);
-      config.channel_r05.shm_name = c.value("shmName", config.channel_r05.shm_name);
-      config.channel_r05.mutex_name = c.value("mutexName", config.channel_r05.mutex_name);
+      ParseChannelObject(j["channels"]["r05"], config.point_cloud_defaults, &config.channel_r05);
     }
     if (j["channels"].contains("r09")) {
-      const auto& c = j["channels"]["r09"];
-      config.channel_r09.enabled = c.value("enabled", true);
-      config.channel_r09.shm_name = c.value("shmName", config.channel_r09.shm_name);
-      config.channel_r09.mutex_name = c.value("mutexName", config.channel_r09.mutex_name);
+      ParseChannelObject(j["channels"]["r09"], config.point_cloud_defaults, &config.channel_r09);
     }
   }
   return config;

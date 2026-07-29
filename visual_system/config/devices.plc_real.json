@@ -1,0 +1,6 @@
+{
+  "cameras": [
+    { "id": "rvc_01", "type": "rvc", "serial": "REPLACE_R05_CAMERA_SN", "station": "r05" },
+    { "id": "rvc_02", "type": "rvc", "serial": "REPLACE_R09_CAMERA_SN", "station": "r09" }
+  ]
+}

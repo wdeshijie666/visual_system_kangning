@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QThread>
 
 #include <filesystem>
 #include <fstream>
@@ -132,14 +133,10 @@ bool AlgoProcessManager::Start() {
   if (!SyncAlgoConfigFile()) {
     LogEvent(tr("算法配置同步失败，仍将尝试启动进程"));
   }
-  // 已有同名进程在跑：避免双开抢 SHM，直接认定就绪
+  // 残留/外部算法进程仍持有启动时读入的旧配置；必须先杀掉再拉起，否则改 pointCloudConfig 不生效
   if (IsAlgoExeAlreadyRunning()) {
-    external_running_ = true;
-    // 外部进程未必已 CHANNEL_READY；勿标 service_ready，避免假就绪
-    service_ready_notified_ = false;
-    LogEvent(tr("检测到算法进程已在运行，跳过重复拉起"));
-    NotifyStatus(tr("外部已运行"), false);
-    return true;
+    LogEvent(tr("检测到已有算法进程，将结束并按最新 algo_config.json 重新启动"));
+    KillExternalAlgoProcesses();
   }
   LaunchProcess();
   return process_.state() != QProcess::NotRunning || restart_pending_;
@@ -179,10 +176,19 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   }
 
   QJsonObject pipeline;
-  // runMode=simulation 只驱动虚拟相机/Memory PLC；有点云算法时禁用通路假结果，便于压测真实 process。
-  const bool use_pc_algo = root.contains(QStringLiteral("usePointCloudAlgo"))
-                               ? root.value(QStringLiteral("usePointCloudAlgo")).toBool(true)
-                               : true;
+  // runMode=simulation 只驱动虚拟相机/Memory PLC；任一工位启用点云算法时禁用通路假结果。
+  const QJsonObject existing_channels = root.value(QStringLiteral("channels")).toObject();
+  const auto channel_uses_pc = [&](const QString& key) -> bool {
+    const QJsonObject ch = existing_channels.value(key).toObject();
+    if (ch.contains(QStringLiteral("usePointCloudAlgo"))) {
+      return ch.value(QStringLiteral("usePointCloudAlgo")).toBool(true);
+    }
+    if (root.contains(QStringLiteral("usePointCloudAlgo"))) {
+      return root.value(QStringLiteral("usePointCloudAlgo")).toBool(true);
+    }
+    return true;
+  };
+  const bool use_pc_algo = channel_uses_pc(QStringLiteral("r05")) || channel_uses_pc(QStringLiteral("r09"));
   pipeline.insert(QStringLiteral("enabled"), simulation_mode_ && !use_pc_algo);
   pipeline.insert(QStringLiteral("imageWidth"), simulation_image_width_);
   pipeline.insert(QStringLiteral("imageHeight"), simulation_image_height_);
@@ -205,18 +211,50 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
               visual::AppContext::Instance().Settings().algo_transfer_pointcloud);
   root.insert(QStringLiteral("transferGray"),
               visual::AppContext::Instance().Settings().algo_transfer_gray);
-  // 保留真实算法开关（若文件已有则不强制改写；缺省写 true）
+
+  // 顶层三项仅作兼容默认；正式按工位写在 channels.* 下
+  const bool default_use_pc =
+      root.contains(QStringLiteral("usePointCloudAlgo"))
+          ? root.value(QStringLiteral("usePointCloudAlgo")).toBool(true)
+          : true;
+  const QString default_pc_cfg =
+      root.contains(QStringLiteral("pointCloudConfig"))
+          ? root.value(QStringLiteral("pointCloudConfig")).toString(QStringLiteral("config.json"))
+          : QStringLiteral("config.json");
+  const int default_top_n =
+      root.contains(QStringLiteral("pointCloudTopN"))
+          ? root.value(QStringLiteral("pointCloudTopN")).toInt(5)
+          : 5;
   if (!root.contains(QStringLiteral("usePointCloudAlgo"))) {
-    root.insert(QStringLiteral("usePointCloudAlgo"), true);
+    root.insert(QStringLiteral("usePointCloudAlgo"), default_use_pc);
   }
   if (!root.contains(QStringLiteral("pointCloudConfig"))) {
-    root.insert(QStringLiteral("pointCloudConfig"), QStringLiteral("config.json"));
+    root.insert(QStringLiteral("pointCloudConfig"), default_pc_cfg);
   }
   if (!root.contains(QStringLiteral("pointCloudTopN"))) {
-    root.insert(QStringLiteral("pointCloudTopN"), 5);
+    root.insert(QStringLiteral("pointCloudTopN"), default_top_n);
   }
 
-  // 将视觉侧双通道名同步给算法进程，保证映射名一致
+  const auto merge_channel_point_cloud = [&](QJsonObject* ch, const QString& key) {
+    if (ch == nullptr) {
+      return;
+    }
+    const QJsonObject prev = existing_channels.value(key).toObject();
+    const bool use_pc = prev.contains(QStringLiteral("usePointCloudAlgo"))
+                            ? prev.value(QStringLiteral("usePointCloudAlgo")).toBool(default_use_pc)
+                            : default_use_pc;
+    const QString pc_cfg = prev.contains(QStringLiteral("pointCloudConfig"))
+                               ? prev.value(QStringLiteral("pointCloudConfig")).toString(default_pc_cfg)
+                               : default_pc_cfg;
+    const int top_n = prev.contains(QStringLiteral("pointCloudTopN"))
+                          ? prev.value(QStringLiteral("pointCloudTopN")).toInt(default_top_n)
+                          : default_top_n;
+    ch->insert(QStringLiteral("usePointCloudAlgo"), use_pc);
+    ch->insert(QStringLiteral("pointCloudConfig"), pc_cfg);
+    ch->insert(QStringLiteral("pointCloudTopN"), top_n > 0 ? top_n : 5);
+  };
+
+  // 将视觉侧双通道名同步给算法进程，并保留/补齐每工位点云参数
   const auto& app_settings = visual::AppContext::Instance().Settings();
   QJsonObject channels;
   QJsonObject ch_r05;
@@ -224,11 +262,13 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   ch_r05.insert(QStringLiteral("shmName"), QString::fromStdString(app_settings.algo_channel_r05.shm_name));
   ch_r05.insert(QStringLiteral("mutexName"),
                 QString::fromStdString(app_settings.algo_channel_r05.mutex_name));
+  merge_channel_point_cloud(&ch_r05, QStringLiteral("r05"));
   QJsonObject ch_r09;
   ch_r09.insert(QStringLiteral("enabled"), app_settings.station_r09.enabled);
   ch_r09.insert(QStringLiteral("shmName"), QString::fromStdString(app_settings.algo_channel_r09.shm_name));
   ch_r09.insert(QStringLiteral("mutexName"),
                 QString::fromStdString(app_settings.algo_channel_r09.mutex_name));
+  merge_channel_point_cloud(&ch_r09, QStringLiteral("r09"));
   channels.insert(QStringLiteral("r05"), ch_r05);
   channels.insert(QStringLiteral("r09"), ch_r09);
   root.insert(QStringLiteral("channels"), channels);
@@ -251,6 +291,7 @@ void AlgoProcessManager::Stop() {
   restart_pending_ = false;
   restart_timer_.stop();
   KillProcess();
+  KillExternalAlgoProcesses();
   external_running_ = false;
   channels_ready_count_ = 0;
   service_ready_notified_ = false;
@@ -344,6 +385,46 @@ void AlgoProcessManager::KillProcess() {
     process_.kill();
     process_.waitForFinished(1000);
   }
+}
+
+void AlgoProcessManager::KillExternalAlgoProcesses() {
+#ifdef _WIN32
+  const QString want = QFileInfo(ResolveExePath()).fileName();
+  if (want.isEmpty()) {
+    return;
+  }
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) {
+    return;
+  }
+  PROCESSENTRY32W pe{};
+  pe.dwSize = sizeof(pe);
+  const DWORD self_pid = GetCurrentProcessId();
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      if (pe.th32ProcessID == self_pid) {
+        continue;
+      }
+      const QString name = QString::fromWCharArray(pe.szExeFile);
+      if (QString::compare(name, want, Qt::CaseInsensitive) != 0) {
+        continue;
+      }
+      HANDLE proc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID);
+      if (proc == nullptr) {
+        continue;
+      }
+      LogEvent(tr("结束残留算法进程 pid=%1").arg(pe.th32ProcessID));
+      TerminateProcess(proc, 1);
+      WaitForSingleObject(proc, 3000);
+      CloseHandle(proc);
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  // 给系统一点时间释放 SHM/互斥体句柄
+  QThread::msleep(200);
+#else
+  (void)0;
+#endif
 }
 
 void AlgoProcessManager::OnProcessStarted() {

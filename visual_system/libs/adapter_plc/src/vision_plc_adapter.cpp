@@ -110,9 +110,10 @@ struct VisionPlcAdapter::Impl {
     const int interval_sec =
         sim_auto_trigger_interval_sec > 0 ? sim_auto_trigger_interval_sec : 30;
     inject_thread = std::thread([this, interval_sec]() {
-      // 仅 MemoryTransport：同 tick 同时注入 R05+R09，压测双通道并行 process。
+      // 仅 MemoryTransport：R05 / R09 按间隔先后轮流注入，避免同 tick 双触发。
       // 真机 libplctag 编译路径不进入本函数。
       bool first = true;
+      bool next_is_r05 = true;
       while (inject_running.load()) {
         const int wait_sec = first ? 1 : interval_sec;
         first = false;
@@ -127,17 +128,20 @@ struct VisionPlcAdapter::Impl {
           if (!driver.IsConnected()) {
             continue;
           }
-          const auto st05 = driver.SimulatePlcTrigger(vision_plc::VisionStation::kR05, true);
-          const auto st09 = driver.SimulatePlcTrigger(vision_plc::VisionStation::kR09, true);
-          if (st05.ok() && st09.ok()) {
+          const auto station =
+              next_is_r05 ? vision_plc::VisionStation::kR05 : vision_plc::VisionStation::kR09;
+          const char* tag = next_is_r05 ? "R05" : "R09";
+          const auto st = driver.SimulatePlcTrigger(station, true);
+          if (st.ok()) {
             std::ostringstream oss;
-            oss << "PLC仿真 同时注入触发 R05+R09（间隔 " << interval_sec << "s）";
+            oss << "PLC仿真 轮流注入触发 " << tag << "（间隔 " << interval_sec << "s）";
             LogToStderr(LogSeverity::kInfo, oss.str());
           } else {
             std::ostringstream oss;
-            oss << "PLC仿真 注入触发失败 R05=" << st05.message << " R09=" << st09.message;
+            oss << "PLC仿真 注入触发失败 " << tag << "=" << st.message;
             LogToStderr(LogSeverity::kWarning, oss.str());
           }
+          next_is_r05 = !next_is_r05;
         }
       }
     });

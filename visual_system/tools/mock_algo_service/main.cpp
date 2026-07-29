@@ -40,6 +40,11 @@ int main() {
   const algo::AlgoConfig config = algo::LoadAlgoConfig(exe_dir);
   algo::SetAlgoLogLevel(config.log_level);
 
+  algo::AlgoInfo(std::string("点云配置 R05=") + config.channel_r05.point_cloud.point_cloud_config +
+                 " topN=" + std::to_string(config.channel_r05.point_cloud.point_cloud_top_n));
+  algo::AlgoInfo(std::string("点云配置 R09=") + config.channel_r09.point_cloud.point_cloud_config +
+                 " topN=" + std::to_string(config.channel_r09.point_cloud.point_cloud_top_n));
+
   if (config.mode == algo::RunMode::kOfflineReplay) {
     algo::AlgoInfo("算法模式: 离线回放");
     return algo::RunOfflineReplay(config);

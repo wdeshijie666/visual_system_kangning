@@ -70,16 +70,12 @@ add_custom_command(TARGET VisualSystem POST_BUILD
     "$<TARGET_FILE_DIR:VisualSystem>/camera_parmas"
   COMMAND ${CMAKE_COMMAND} -E make_directory
     "$<TARGET_FILE_DIR:VisualSystem>/alg_program"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "$<TARGET_FILE_DIR:mock_algo_service>/mock_algo_service.exe"
-    "$<TARGET_FILE_DIR:VisualSystem>/alg_program/mock_algo_service.exe"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/mock_algo_service/algo_config.json"
-    "$<TARGET_FILE_DIR:VisualSystem>/alg_program/algo_config.json"
-  # 将算法进程旁的 DLL / config.json 一并同步到 alg_program（真实 PointCloud 依赖）
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "$<TARGET_FILE_DIR:mock_algo_service>"
-    "$<TARGET_FILE_DIR:VisualSystem>/alg_program"
+  # 同步算法运行库；已存在的 algo_config.json 保留现场修改
+  COMMAND ${CMAKE_COMMAND}
+    "-DMOCK_DIR=$<TARGET_FILE_DIR:mock_algo_service>"
+    "-DDST_DIR=$<TARGET_FILE_DIR:VisualSystem>/alg_program"
+    "-DDEFAULT_ALGO_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/../../tools/mock_algo_service/algo_config.json"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/sync_alg_program.cmake"
   VERBATIM
 )
 

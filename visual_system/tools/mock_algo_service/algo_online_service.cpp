@@ -251,14 +251,16 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
         AlgoDebug(std::string("[") + tag + "] 使用通路仿真结果");
       } else {
 #if defined(VS_HAS_POINTCLOUD_ALGO)
-        if (config.use_point_cloud_algo) {
+        const PointCloudAlgoOptions& pc = PointCloudOptionsForChannel(config, channel);
+        if (pc.use_point_cloud_algo) {
           bool algo_ok = false;
           try {
-            // 暂不加全局锁：R05/R09 可并行 process（各通道独立引擎实例）。
-            AlgoInfo(std::string("[") + tag + "] 开始计算");
+            // 暂不加全局锁：R05/R09 可并行 process（各通道独立引擎实例，配置可不同）。
+            AlgoInfo(std::string("[") + tag + "] 开始计算 config=" + pc.point_cloud_config +
+                     " topN=" + std::to_string(pc.point_cloud_top_n));
             algo_ok = RunPointCloudFromShm(header, blob_arena, blob_arena_size, config, exe_dir,
                                            header->logs, visual::shm::kLogCount, &algo_error,
-                                           processor_slot);
+                                           processor_slot, &pc);
           } catch (const std::exception& ex) {
             algo_ok = false;
             algo_error = std::string("算法异常: ") + ex.what();

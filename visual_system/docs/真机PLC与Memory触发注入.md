@@ -87,7 +87,7 @@ cmake --build visual_system/build --config Release --target VisualSystem
 ### 行为
 
 1. 点 **启动** → `StartHeartbeat` → 启动注入线程。
-2. 约 1s 后首次注入，之后每 N 秒一次；**R05 / R09 交替**。
+2. 约 1s 后首次注入 R05，之后每 N 秒轮流注入：**R05 → R09 → R05 → …**。
 3. 引擎 `PollLoop` 上升沿 → `RunCycle` → 写结果。
 4. `WriteLogResults` / `WriteSequenceCompleted` 时向 **stderr** 打印，例如：
 

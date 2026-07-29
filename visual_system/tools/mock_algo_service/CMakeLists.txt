@@ -133,9 +133,10 @@ if(VS_HAS_POINTCLOUD_ALGO)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_CURRENT_SOURCE_DIR}/point_cloud_config.json"
       "$<TARGET_FILE_DIR:mock_algo_service>/config.json"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
-      "$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
+    COMMAND ${CMAKE_COMMAND}
+      -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json
+      -DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
       -DSRC=${THIRD_PARTY_BIN_DIR}
       -DSRC_RELEASE=${CMAKE_CURRENT_SOURCE_DIR}/runtime_release_overrides
@@ -147,9 +148,10 @@ if(VS_HAS_POINTCLOUD_ALGO)
   )
 else()
   add_custom_command(TARGET mock_algo_service POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
-      "$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
+    COMMAND ${CMAKE_COMMAND}
+      -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json
+      -DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
       -DDST=$<TARGET_FILE_DIR:mock_algo_service>
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/deploy_msvc_runtime.cmake"

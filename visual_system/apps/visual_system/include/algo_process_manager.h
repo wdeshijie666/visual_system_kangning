@@ -40,6 +40,8 @@ class AlgoProcessManager : public QObject {
   void RecordRestartAttempt();
   void NotifyStatus(const QString& detail, bool service_ready = true);
   void KillProcess();
+  /** 结束系统中其它同名算法进程（含上次残留），便于加载最新 algo_config.json。 */
+  void KillExternalAlgoProcesses();
   bool SyncAlgoConfigFile();
   /** 是否已有同名算法 exe 在系统中运行（含外部手动启动）。 */
   bool IsAlgoExeAlreadyRunning() const;

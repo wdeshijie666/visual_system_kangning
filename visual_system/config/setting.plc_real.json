@@ -1,0 +1,60 @@
+{
+  "appName": "SmartGuide",
+  "logoPath": "./resources/logo.png",
+  "dataPath": "./data",
+  "dataRetentionDays": 7,
+  "runMode": "production",
+  "plc": {
+    "gateway": "192.168.1.10",
+    "path": "1,0",
+    "simAutoTrigger": false,
+    "simAutoTriggerIntervalSec": 30,
+    "tags": {
+      "cameraToPlc": "CameraToPLC_Int",
+      "plcToCamera": "PLCToCamera_Int"
+    }
+  },
+  "stations": {
+    "r05": { "enabled": true, "cameras": ["rvc_01"], "robots": ["R05", "R07"] },
+    "r09": { "enabled": true, "cameras": ["rvc_02"], "robots": ["R09"] }
+  },
+  "simulation": {
+    "imageWidth": 2448,
+    "imageHeight": 2048,
+    "algoResult": {
+      "status": 1,
+      "offsetX": 0.1,
+      "offsetY": 0,
+      "offsetR": 0,
+      "diameter": 100,
+      "length": 800
+    }
+  },
+  "dataStub": {
+    "saveDepth": true,
+    "savePointcloud": false,
+    "saveGray": true
+  },
+  "algo": {
+    "shmName": "Local\\VisualSystemAlgo_v2",
+    "timeoutMs": 30000,
+    "useShm": true,
+    "transferDepth": true,
+    "transferPointcloud": false,
+    "transferGray": true,
+    "debugSaveDepth": false,
+    "debugSavePointcloud": false,
+    "programDir": "alg_program",
+    "programExe": "mock_algo_service.exe",
+    "channels": {
+      "r05": {
+        "shmName": "Local\\VisualSystemAlgo_R05_v6",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R05_v6"
+      },
+      "r09": {
+        "shmName": "Local\\VisualSystemAlgo_R09_v6",
+        "mutexName": "Local\\VisualSystemAlgoMutex_R09_v6"
+      }
+    }
+  }
+}
