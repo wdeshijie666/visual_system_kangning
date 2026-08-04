@@ -1,5 +1,6 @@
 # 本文件被顶层 CMakeLists include；记录脚本绝对路径供 POST_BUILD 使用。
 set(VS_DEPLOY_EXE_RUNTIME_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/deploy_exe_runtime.cmake")
+set(VS_COPY_PLC_DRIVER_DLLS_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/copy_plc_driver_dlls.cmake")
 
 function(vs_copy_runtime_dlls target)
   if(NOT WIN32)
@@ -58,4 +59,15 @@ function(vs_copy_runtime_dlls target)
       -P "${VS_DEPLOY_EXE_RUNTIME_SCRIPT}"
     COMMENT "Deploy runtime DLLs beside ${target} (Qt/RVC/OpenCV/MSVC)"
     VERBATIM)
+
+  # VISION_PLC_BUILD_SHARED=ON 时，vision_plc_driver.dll 与 exe 不同目录，需一并拷贝
+  if(TARGET vision_plc_driver)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND}
+        "-DSRC_DIR=$<TARGET_FILE_DIR:vision_plc_driver>"
+        "-DDST=$<TARGET_FILE_DIR:${target}>"
+        -P "${VS_COPY_PLC_DRIVER_DLLS_SCRIPT}"
+      COMMENT "Copy *_plc_driver.dll beside ${target}"
+      VERBATIM)
+  endif()
 endfunction()
