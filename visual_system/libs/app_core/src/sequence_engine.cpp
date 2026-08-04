@@ -560,7 +560,8 @@ void SequenceEngine::OnCycleOutcome(StationId station, bool capture_ok, bool alg
 
 void SequenceEngine::PollLoop() {
   bool last_r05 = false;
-  bool last_r07 = false;
+  // R05/R07 现场合并为一工位且共用触发位；暂屏蔽 R07 监听，恢复时取消本段相关注释即可。
+  // bool last_r07 = false;
   bool last_r09 = false;
 
   while (running_.load()) {
@@ -576,12 +577,12 @@ void SequenceEngine::PollLoop() {
     }
 
     bool r05 = false;
-    bool r07 = false;
+    // bool r07 = false;
     bool r09 = false;
     const bool ok_r05 = plc_->PollTrigger(StationId::kR05, &r05);
-    const bool ok_r07 = plc_->PollTrigger(StationId::kR07, &r07);
+    // const bool ok_r07 = plc_->PollTrigger(StationId::kR07, &r07);
     const bool ok_r09 = plc_->PollTrigger(StationId::kR09, &r09);
-    if (!ok_r05 || !ok_r07 || !ok_r09) {
+    if (!ok_r05 || /* !ok_r07 || */ !ok_r09) {
       EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("PLC 触发读取失败"));
       EventBus::Instance().NotifyPlcStatus(false, false);
       AlarmService::Instance().Raise(AlarmLevel::kWarning, QStringLiteral("PLC"),
@@ -592,16 +593,17 @@ void SequenceEngine::PollLoop() {
     }
 
     const bool edge_r05 = r05 && !last_r05;
-    const bool edge_r07 = r07 && !last_r07;
+    // const bool edge_r07 = r07 && !last_r07;
     const bool edge_r09 = r09 && !last_r09;
     last_r05 = r05;
-    last_r07 = r07;
+    // last_r07 = r07;
     last_r09 = r09;
 
     if (edge_r09) {
       HandleProductionTrigger(StationId::kR09, AppContext::Instance().Settings().station_r09);
     }
-    if (edge_r05 || edge_r07) {
+    // 原：edge_r05 || edge_r07；R07 监听屏蔽后仅看 R05 边沿。
+    if (edge_r05 /* || edge_r07 */) {
       HandleProductionTrigger(StationId::kR05, AppContext::Instance().Settings().station_r05);
     }
 
