@@ -368,7 +368,8 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
     std::error_code space_ec;
     const auto info = fs::space(session_dir.empty() ? "." : session_dir, space_ec);
     if (!space_ec && info.available < 50ull * 1024ull * 1024ull) {
-      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("disk low, skip stub save"));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning,
+                                     QStringLiteral("磁盘空间不足，本次未保存图片"));
       return false;
     }
   }
@@ -385,10 +386,8 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
     if (ext == ".tif" || ext == ".tiff" || ext == ".TIF" || ext == ".TIFF") {
       depth_ok = fs::exists(depth_fs);
       if (!depth_ok) {
-        EventBus::Instance().NotifyLog(
-            LogSeverity::kWarning,
-            QString("save depth skipped/missing tiff (use camera SaveLastCaptureToDir): %1")
-                .arg(QString::fromStdString(bundle.depth_path)));
+        EventBus::Instance().NotifyLog(LogSeverity::kWarning,
+                                       QStringLiteral("深度图文件未生成，本次未保存深度图"));
       }
     } else if (!bundle.depth) {
       depth_ok = false;
@@ -401,9 +400,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
                                         static_cast<int>(bundle.depth->height));
     }
     if (!depth_ok && ext != ".tif" && ext != ".tiff" && ext != ".TIF" && ext != ".TIFF") {
-      EventBus::Instance().NotifyLog(
-          LogSeverity::kWarning,
-          QString("save depth failed: %1").arg(QString::fromStdString(bundle.depth_path)));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("深度图保存失败"));
     }
     ok = depth_ok && ok;
   }
@@ -418,9 +415,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
       ply_ok = WritePointCloudPly(fs::path(bundle.pointcloud_path), stub);
     }
     if (!ply_ok) {
-      EventBus::Instance().NotifyLog(
-          LogSeverity::kWarning,
-          QString("save ply failed: %1").arg(QString::fromStdString(bundle.pointcloud_path)));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("点云保存失败"));
     }
     ok = ply_ok && ok;
   }
@@ -430,9 +425,7 @@ bool SaveCaptureBundleToDir(const CaptureBundle& bundle) {
       gray_ok = WriteMono8GrayPgm(fs::path(bundle.gray_path), *bundle.gray);
     }
     if (!gray_ok) {
-      EventBus::Instance().NotifyLog(
-          LogSeverity::kWarning,
-          QString("save gray failed: %1").arg(QString::fromStdString(bundle.gray_path)));
+      EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("灰度图保存失败"));
     }
     ok = gray_ok && ok;
   }
@@ -479,7 +472,8 @@ void CaptureSaveWorker::Enqueue(CaptureBundle bundle) {
     }
   }
   if (dropped) {
-    EventBus::Instance().NotifyLog(LogSeverity::kWarning, QStringLiteral("点云落盘队列已满，丢弃本次异步保存"));
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning,
+                                   QStringLiteral("保存任务过多，本次点云未保存"));
     return;
   }
   cv_.notify_one();
@@ -505,7 +499,7 @@ void CaptureSaveWorker::WorkerLoop() {
     if (!SaveCaptureBundleToDir(job)) {
       EventBus::Instance().NotifyLog(
           LogSeverity::kWarning,
-          QString("async capture save failed: %1").arg(QString::fromStdString(job.camera_serial)));
+          QStringLiteral("相机 %1 后台保存失败").arg(QString::fromStdString(job.camera_serial)));
     }
   }
 }
@@ -658,7 +652,7 @@ void DataStubRetentionCleaner::WorkerLoop() {
     const std::size_t removed = PurgeExpiredStubsOnce(data_path_, retention_days_);
     if (removed > 0) {
       EventBus::Instance().NotifyLog(
-          QString("data stub cleanup removed %1 file(s), keep %2 day(s)")
+          QStringLiteral("已清理过期存图 %1 个文件（保留 %2 天）")
               .arg(static_cast<qulonglong>(removed))
               .arg(retention_days_));
     }

@@ -62,19 +62,10 @@ vision_plc::VisionLogResultBatch ToPlcBatch(const LogResultBatch& batch) {
 }
 
 void PrintVisionResults(StationId station, const LogResultBatch& batch) {
-  {
-    std::ostringstream oss;
-    oss << "PLC仿真 收到视觉结果 station=" << StationTag(station);
-    LogToStderr(LogSeverity::kInfo, oss.str());
-  }
-  for (std::size_t i = 0; i < batch.size(); ++i) {
-    const auto& r = batch[i];
-    std::ostringstream oss;
-    oss << "PLC仿真 Log" << (i + 1) << " status=" << static_cast<int>(r.status)
-        << " X=" << r.offset_x_mm << " Y=" << r.offset_y_mm << " R=" << r.offset_r_deg
-        << " D=" << r.diameter_mm << " L=" << r.length_mm;
-    LogToStderr(LogSeverity::kInfo, oss.str());
-  }
+  // 仿真控制台摘要：正式真机不走此路径；避免每条 Log 刷屏
+  std::ostringstream oss;
+  oss << "仿真：已收到 " << StationTag(station) << " 检测结果共 " << batch.size() << " 条";
+  LogToStderr(LogSeverity::kInfo, oss.str());
 }
 
 }  // namespace
@@ -134,11 +125,11 @@ struct VisionPlcAdapter::Impl {
           const auto st = driver.SimulatePlcTrigger(station, true);
           if (st.ok()) {
             std::ostringstream oss;
-            oss << "PLC仿真 轮流注入触发 " << tag << "（间隔 " << interval_sec << "s）";
+            oss << "仿真：自动触发 " << tag << "（间隔 " << interval_sec << " 秒）";
             LogToStderr(LogSeverity::kInfo, oss.str());
           } else {
             std::ostringstream oss;
-            oss << "PLC仿真 注入触发失败 " << tag << "=" << st.message;
+            oss << "仿真：自动触发 " << tag << " 失败";
             LogToStderr(LogSeverity::kWarning, oss.str());
           }
           next_is_r05 = !next_is_r05;
@@ -186,14 +177,8 @@ bool VisionPlcAdapter::Connect(const PlcConnectionOptions& opts) {
   conn.gateway = opts.gateway;
   conn.path = opts.path;
   conn.timeout_ms = opts.timeout_ms;
+  // Connect 内已探测两侧数据区；勿再用 PollTrigger 探活（默认会清触发位）
   if (!impl_->driver.Connect(conn).ok()) {
-    return false;
-  }
-
-  // 连接真值：读一次触发位，失败则视为未连上
-  vision_plc::VisionTriggerCommand cmd;
-  if (!impl_->driver.PollTrigger(vision_plc::VisionStation::kR05, &cmd).ok()) {
-    impl_->driver.Disconnect();
     return false;
   }
   return true;
@@ -259,8 +244,7 @@ bool VisionPlcAdapter::WriteSequenceCompleted(StationId station, bool completed)
   std::lock_guard<std::mutex> lock(impl_->io_mutex);
   if (impl_->use_memory_transport) {
     std::ostringstream oss;
-    oss << "PLC仿真 SequenceCompleted station=" << StationTag(station)
-        << " completed=" << (completed ? 1 : 0);
+    oss << "仿真：" << StationTag(station) << (completed ? " 本轮完成" : " 完成信号已清除");
     LogToStderr(LogSeverity::kInfo, oss.str());
   }
   return impl_->driver.WriteSequenceCompleted(ToPlcStation(station), completed).ok();

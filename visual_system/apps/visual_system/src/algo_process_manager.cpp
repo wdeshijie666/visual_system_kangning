@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QThread>
 
 #include <filesystem>
@@ -73,7 +74,7 @@ AlgoProcessManager::AlgoProcessManager(QObject* parent) : QObject(parent) {
   // SHM 超时等场景：杀进程后走现有自动拉起逻辑
   connect(&visual::EventBus::Instance(), &visual::EventBus::RequestAlgoRestart, this,
           [this](const QString& reason) {
-            LogEvent(tr("收到算法重启请求: %1").arg(reason));
+            LogEvent(tr("收到算法重启请求"));
             NotifyStatus(tr("超时重启中"), false);
             KillProcess();
             if (!intentional_stop_) {
@@ -131,11 +132,11 @@ bool AlgoProcessManager::Start() {
   service_ready_notified_ = false;
   restart_timestamps_ms_.clear();
   if (!SyncAlgoConfigFile()) {
-    LogEvent(tr("算法配置同步失败，仍将尝试启动进程"));
+    LogEvent(tr("算法配置同步失败，仍将尝试启动算法"));
   }
   // 残留/外部算法进程仍持有启动时读入的旧配置；必须先杀掉再拉起，否则改 pointCloudConfig 不生效
   if (IsAlgoExeAlreadyRunning()) {
-    LogEvent(tr("检测到已有算法进程，将结束并按最新 algo_config.json 重新启动"));
+    LogEvent(tr("发现已有算法在运行，将按最新配置重新启动"));
     KillExternalAlgoProcesses();
   }
   LaunchProcess();
@@ -149,14 +150,14 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   QJsonObject root;
   if (file.exists()) {
     if (!file.open(QIODevice::ReadOnly)) {
-      LogEvent(tr("无法读取算法配置: %1").arg(QDir::toNativeSeparators(config_path)));
+      LogEvent(tr("无法读取算法配置文件"));
       return false;
     }
     QJsonParseError parse_error{};
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parse_error);
     file.close();
     if (parse_error.error != QJsonParseError::NoError || !doc.isObject()) {
-      LogEvent(tr("算法配置 JSON 无效: %1").arg(QDir::toNativeSeparators(config_path)));
+      LogEvent(tr("算法配置文件内容无效"));
       return false;
     }
     root = doc.object();
@@ -170,9 +171,7 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   }
   if (mode == visual::algo_config::kModeOfflineReplay) {
     root.insert(QStringLiteral("mode"), visual::algo_config::kModeOnline);
-    LogEvent(tr("算法配置已从回放模式(%1)改为在线模式(%2)")
-                 .arg(visual::algo_config::kModeOfflineReplay)
-                 .arg(visual::algo_config::kModeOnline));
+    LogEvent(tr("算法配置已改为在线计算模式"));
   }
 
   QJsonObject pipeline;
@@ -274,15 +273,14 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   root.insert(QStringLiteral("channels"), channels);
 
   if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    LogEvent(tr("无法写入算法配置: %1").arg(QDir::toNativeSeparators(config_path)));
+    LogEvent(tr("无法保存算法配置文件"));
     return false;
   }
   file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
   file.close();
 
-  LogEvent((simulation_mode_ && !use_pc_algo)
-               ? tr("算法配置已同步为通路仿真模式")
-               : tr("算法配置已同步为实机算法模式（仿真相机/PLC 时可并行压测 process）"));
+  LogEvent((simulation_mode_ && !use_pc_algo) ? tr("算法配置已按仿真方式准备就绪")
+                                              : tr("算法配置已按正式计算准备就绪"));
   return true;
 }
 
@@ -346,8 +344,7 @@ void AlgoProcessManager::LaunchProcess() {
   const QString exe_path = ResolveExePath();
   const QFileInfo exe_info(exe_path);
   if (!exe_info.exists() || !exe_info.isFile()) {
-    const QString msg =
-        tr("算法程序不存在: %1").arg(QDir::toNativeSeparators(exe_path));
+    const QString msg = tr("找不到算法程序，请检查安装目录");
     LogEvent(msg);
     NotifyStatus(msg, false);
     return;
@@ -360,14 +357,12 @@ void AlgoProcessManager::LaunchProcess() {
 
   channels_ready_count_ = 0;
   service_ready_notified_ = false;
-  LogEvent(tr("启动算法进程: %1").arg(QDir::toNativeSeparators(exe_path)));
+  LogEvent(tr("正在启动算法"));
   NotifyStatus(tr("启动中"), false);
 
   process_.start();
   if (!process_.waitForStarted(5000)) {
-    const QString msg =
-        tr("算法进程启动失败: %1 (%2)")
-            .arg(QDir::toNativeSeparators(exe_path), process_.errorString());
+    const QString msg = tr("算法启动失败：%1").arg(process_.errorString());
     LogEvent(msg);
     NotifyStatus(msg, false);
     if (!intentional_stop_ && ShouldRestart()) {
@@ -413,7 +408,7 @@ void AlgoProcessManager::KillExternalAlgoProcesses() {
       if (proc == nullptr) {
         continue;
       }
-      LogEvent(tr("结束残留算法进程 pid=%1").arg(pe.th32ProcessID));
+      LogEvent(tr("已结束旧的算法程序"));
       TerminateProcess(proc, 1);
       WaitForSingleObject(proc, 3000);
       CloseHandle(proc);
@@ -430,9 +425,9 @@ void AlgoProcessManager::KillExternalAlgoProcesses() {
 void AlgoProcessManager::OnProcessStarted() {
   channels_ready_count_ = 0;
   service_ready_notified_ = false;
-  const QString msg = tr("算法进程已启动 (pid=%1)，等待通道就绪").arg(process_.processId());
+  const QString msg = tr("算法已启动，等待就绪");
   LogEvent(msg);
-  // 进程在跑但 SHM 通道尚未监听：alive=true、ready=false，避免首包竞态
+  // 进程在跑但通道尚未监听：alive=true、ready=false，避免首包竞态
   NotifyStatus(tr("启动中"), false);
 }
 
@@ -440,17 +435,18 @@ void AlgoProcessManager::OnProcessFinished(int exit_code, QProcess::ExitStatus s
   channels_ready_count_ = 0;
   service_ready_notified_ = false;
   if (intentional_stop_) {
-    LogEvent(tr("算法进程已退出 (intentional, exit=%1)").arg(exit_code));
+    LogEvent(tr("算法已正常退出"));
     NotifyStatus(tr("已停止"), false);
     return;
   }
 
   QString reason;
   if (status == QProcess::CrashExit) {
-    reason = tr("算法进程崩溃 (exit=%1)").arg(exit_code);
+    reason = tr("算法异常退出，准备重启");
   } else {
-    reason = tr("算法进程异常退出 (exit=%1)").arg(exit_code);
+    reason = tr("算法意外退出，准备重启");
   }
+  (void)exit_code;
   LogEvent(reason);
   NotifyStatus(reason, false);
   ScheduleRestart(reason);
@@ -460,14 +456,24 @@ void AlgoProcessManager::OnProcessError(QProcess::ProcessError error) {
   if (intentional_stop_) {
     return;
   }
-  const QString msg =
-      tr("算法进程错误: %1 (%2)").arg(ProcessErrorText(error), process_.errorString());
+  const QString msg = tr("算法运行出错：%1").arg(process_.errorString());
   LogEvent(msg);
   NotifyStatus(msg, false);
   if (error == QProcess::FailedToStart && process_.state() == QProcess::NotRunning) {
     ScheduleRestart(msg);
   }
 }
+
+namespace {
+/** 去掉算法子进程自带的 [级别][时间] 前缀，避免界面双重时间戳。 */
+QString StripAlgoStamp(const QString& line) {
+  static const QRegularExpression kStamp(
+      QStringLiteral(R"(^\[(?:info|warning|debug|error)\]\s*\[[^\]]+\]\s*)"));
+  QString out = line;
+  out.remove(kStamp);
+  return out.trimmed();
+}
+}  // namespace
 
 void AlgoProcessManager::OnReadyReadStdout() {
   // 算法进程以 /utf-8 编译，stdout 为 UTF-8；不可用 fromLocal8Bit（会按系统 ANSI 解导致中文乱码）
@@ -476,8 +482,11 @@ void AlgoProcessManager::OnReadyReadStdout() {
     return;
   }
   for (const QString& line : text.split('\n', Qt::SkipEmptyParts)) {
-    const QString trimmed = line.trimmed();
-    LogEvent(QStringLiteral("[algo] %1").arg(trimmed));
+    const QString trimmed = StripAlgoStamp(line.trimmed());
+    if (trimmed.isEmpty()) {
+      continue;
+    }
+    LogEvent(QStringLiteral("算法：%1").arg(trimmed));
     NoteAlgoLogLine(trimmed);
   }
 }
@@ -488,8 +497,11 @@ void AlgoProcessManager::OnReadyReadStderr() {
     return;
   }
   for (const QString& line : text.split('\n', Qt::SkipEmptyParts)) {
-    const QString trimmed = line.trimmed();
-    LogEvent(QStringLiteral("[algo] %1").arg(trimmed));
+    const QString trimmed = StripAlgoStamp(line.trimmed());
+    if (trimmed.isEmpty()) {
+      continue;
+    }
+    LogEvent(QStringLiteral("算法：%1").arg(trimmed));
     NoteAlgoLogLine(trimmed);
   }
 }
@@ -523,7 +535,7 @@ void AlgoProcessManager::ScheduleRestart(const QString& reason) {
     return;
   }
   if (!ShouldRestart()) {
-    const QString msg = tr("算法进程重启次数过多，已停止自动拉起: %1").arg(reason);
+    const QString msg = tr("算法短时间多次退出，已停止自动重启");
     LogEvent(msg);
     NotifyStatus(msg, false);
     return;
@@ -531,7 +543,7 @@ void AlgoProcessManager::ScheduleRestart(const QString& reason) {
 
   RecordRestartAttempt();
   restart_pending_ = true;
-  const QString msg = tr("将在 %1 ms 后重启算法进程: %2").arg(kRestartDelayMs).arg(reason);
+  const QString msg = tr("约 %1 秒后自动重启算法").arg(kRestartDelayMs / 1000);
   LogEvent(msg);
   NotifyStatus(tr("等待重启"), false);
   restart_timer_.start(kRestartDelayMs);
@@ -573,7 +585,7 @@ void AlgoProcessManager::NoteAlgoLogLine(const QString& line) {
   ++channels_ready_count_;
   if (channels_ready_count_ >= 1 && !service_ready_notified_) {
     service_ready_notified_ = true;
-    LogEvent(tr("算法通道已就绪，可接收请求"));
+    LogEvent(tr("算法已就绪，可以接收计算任务"));
     NotifyStatus(tr("运行中"), true);
   }
 }

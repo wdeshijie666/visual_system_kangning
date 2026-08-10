@@ -356,7 +356,7 @@ void MainWindow::BindRecipeImportHandler(CameraManagerWidget* camera_manager) {
         if (!cam || !cam->IsConnected()) {
           visual::EventBus::Instance().NotifyLog(
               visual::LogSeverity::kWarning,
-              QStringLiteral("配方导入失败: 相机 %1 未连接").arg(camera_id));
+              QStringLiteral("配方导入失败：相机 %1 未连接").arg(camera_id));
           statusBar()->showMessage(tr("配方导入失败：相机未连接"), 5000);
           return;
         }
@@ -365,7 +365,7 @@ void MainWindow::BindRecipeImportHandler(CameraManagerWidget* camera_manager) {
         if (!cam->LoadRecipeFile(utf8_path, &params)) {
           visual::EventBus::Instance().NotifyLog(
               visual::LogSeverity::kWarning,
-              QStringLiteral("配方导入失败: %1 → 相机 %2").arg(path, camera_id));
+              QStringLiteral("配方导入失败：相机 %1").arg(camera_id));
           statusBar()->showMessage(tr("配方导入失败"), 5000);
           return;
         }
@@ -373,7 +373,7 @@ void MainWindow::BindRecipeImportHandler(CameraManagerWidget* camera_manager) {
           camera_manager->SetRecipeParams(params);
         }
         visual::EventBus::Instance().NotifyLog(
-            QStringLiteral("配方导入成功: %1 → 相机 %2").arg(path, camera_id));
+            QStringLiteral("配方导入成功：相机 %1").arg(camera_id));
         statusBar()->showMessage(tr("配方导入成功"), 3000);
       });
 }
@@ -424,7 +424,7 @@ void MainWindow::TryAutoStartEngine() {
     }
     visual::EventBus::Instance().NotifyLog(
         visual::LogSeverity::kWarning,
-        QStringLiteral("自动启动：等待算法就绪超时，仍尝试启动产线"));
+        QStringLiteral("等待算法就绪超时，仍尝试启动产线"));
   }
   auto_start_done_ = true;
   // 通道刚就绪后再略等一拍，避免与算法线程首轮初始化交错
@@ -592,7 +592,7 @@ void MainWindow::OnStartEngine() {
   if (!simulation_mode_) {
     QString reason;
     if (!EnsureProductionDevicesReady(&reason)) {
-      const QString msg = tr("设备状态异常，无法启动在线运行：%1").arg(reason);
+      const QString msg = tr("设备状态异常，无法启动生产：%1").arg(reason);
       visual::EventBus::Instance().NotifyLog(msg);
       statusBar()->showMessage(msg, 8000);
       ApplyProductionStartInterlock();
@@ -605,7 +605,8 @@ void MainWindow::OnStartEngine() {
   device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   ResetStationCycleStatusLabels();
   UpdateEngineControlState(true);
-  statusBar()->showMessage(tr("SequenceEngine 已启动（离线测试已禁用）"));
+  visual::EventBus::Instance().NotifyLog(QStringLiteral("产线已启动"));
+  statusBar()->showMessage(tr("产线已启动"));
 }
 
 void MainWindow::OnStopEngine() {
@@ -616,7 +617,8 @@ void MainWindow::OnStopEngine() {
   device_status_->SetPlcStatus(engine_->IsPlcConnected(), engine_->IsPlcConnected());
   ResetStationCycleStatusLabels();
   UpdateEngineControlState(false);
-  statusBar()->showMessage(tr("SequenceEngine 已停止"));
+  visual::EventBus::Instance().NotifyLog(QStringLiteral("产线已停止"));
+  statusBar()->showMessage(tr("产线已停止"));
 }
 
 bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
@@ -628,7 +630,7 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
 
   const auto& settings = visual::AppContext::Instance().Settings();
   if (engine_ == nullptr) {
-    set_reason(tr("编排引擎未就绪"));
+    set_reason(tr("主控未就绪"));
     return false;
   }
 
@@ -654,14 +656,14 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
   if (!offline_cams.isEmpty()) {
     visual::EventBus::Instance().NotifyLog(
         visual::LogSeverity::kWarning,
-        QStringLiteral("部分相机离线仍启动产线（离线工位快应答）: %1")
+        QStringLiteral("部分相机离线仍启动产线（离线工位将快速回复不合格）：%1")
             .arg(offline_cams.join(QStringLiteral(","))));
   }
 
   const bool require_algo_process = visual::AppContext::Instance().Settings().use_shm_algo;
   if (require_algo_process) {
     if (device_status_ == nullptr || !device_status_->IsAlgoOk()) {
-      set_reason(tr("算法服务未运行"));
+      set_reason(tr("算法未运行"));
       return false;
     }
   }
@@ -670,7 +672,7 @@ bool MainWindow::EnsureProductionDevicesReady(QString* reason) {
     if (device_status_ != nullptr) {
       device_status_->SetPlcStatus(false, false);
     }
-    set_reason(tr("PLC未连接"));
+    set_reason(tr("产线控制器未连接"));
     return false;
   }
   if (device_status_ != nullptr) {
@@ -856,7 +858,8 @@ void MainWindow::RunHistoricalReplay(visual::StationId station) {
   }
   if (engine_->IsRunning()) {
     statusBar()->showMessage(tr("产线运行中，无法进行历史回放"));
-    visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning, QStringLiteral("产线运行中，历史回放已拒绝"));
+    visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
+                                           QStringLiteral("产线运行中，请先停止再做历史回放"));
     return;
   }
   const QString default_dir =

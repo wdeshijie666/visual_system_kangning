@@ -40,17 +40,14 @@ int main() {
   const algo::AlgoConfig config = algo::LoadAlgoConfig(exe_dir);
   algo::SetAlgoLogLevel(config.log_level);
 
-  algo::AlgoInfo(std::string("点云配置 R05=") + config.channel_r05.point_cloud.point_cloud_config +
-                 " topN=" + std::to_string(config.channel_r05.point_cloud.point_cloud_top_n));
-  algo::AlgoInfo(std::string("点云配置 R09=") + config.channel_r09.point_cloud.point_cloud_config +
-                 " topN=" + std::to_string(config.channel_r09.point_cloud.point_cloud_top_n));
+  algo::AlgoInfo(std::string("R05 参数文件：") + config.channel_r05.point_cloud.point_cloud_config);
+  algo::AlgoInfo(std::string("R09 参数文件：") + config.channel_r09.point_cloud.point_cloud_config);
 
   if (config.mode == algo::RunMode::kOfflineReplay) {
-    algo::AlgoInfo("算法模式: 离线回放");
+    algo::AlgoInfo("当前为历史回放模式");
     return algo::RunOfflineReplay(config);
   }
 
-  algo::AlgoInfo(std::string("算法模式: 在线  日志=") +
-                 (config.log_level == algo::LogLevel::kDebug ? "debug" : "info"));
+  algo::AlgoInfo("当前为在线计算模式");
   return algo::RunOnlineService(config);
 }

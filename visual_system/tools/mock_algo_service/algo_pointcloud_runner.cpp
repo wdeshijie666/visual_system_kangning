@@ -479,12 +479,12 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
         WritePreviewImageToShm(header, blob_arena, blob_arena_size,
                                gray_cam_index >= 0 ? gray_cam_index : 0, input_gray);
       }
-      AlgoInfo("计算完成 检出=0/" + std::to_string(log_count) + "（空点云跳过 process）");
+      AlgoDebug("计算完成 检出=0/" + std::to_string(log_count) + "（空点云）");
       return true;
     }
 
-    AlgoInfo("深度图 " + std::to_string(depth.cols) + "x" + std::to_string(depth.rows) +
-             " 有效像素=" + std::to_string(positive_depth));
+    AlgoDebug("深度图 " + std::to_string(depth.cols) + "x" + std::to_string(depth.rows) +
+              " 有效像素=" + std::to_string(positive_depth));
 
     if (slot != nullptr) {
       if (slot->processor != nullptr &&
@@ -513,7 +513,7 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
         }
         slot->last_depth_w = depth.cols;
         slot->last_depth_h = depth.rows;
-        AlgoInfo("已加载算法引擎: " + cfg_path.string());
+        AlgoDebug("已加载算法参数: " + cfg_path.string());
       }
       proc = slot->processor.get();
     } else {
@@ -542,12 +542,12 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     const cv::Mat input_gray_keep = draw_image.clone();
 
     // 样例契约：process(depth, gray) → getImage；不在此前调用 loadDepthMap。
-    AlgoInfo("process 开始 top_n=" + std::to_string(top_n));
+    AlgoDebug("开始计算 top_n=" + std::to_string(top_n));
     const int n = PCP_Process(proc, depth, &draw_image, top_n);
     if (n == -999) {
-      AlgoError("PointCloudProcessor::process 发生原生异常；SEH 后禁止 delete 引擎（防堆损坏），进程退出由视觉重启");
+      AlgoError("算法内部异常，程序将退出并由主程序重启");
       if (error) {
-        *error = "算法引擎原生异常，请检查深度数据与 config.json";
+        *error = "算法内部异常，请检查拍照数据与参数文件";
       }
 #ifdef _WIN32
       ExitProcess(1);
@@ -557,8 +557,7 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
 
     const std::size_t point_count = PCP_GetPointCount(proc);
-    AlgoInfo("process 结束 返回=" + std::to_string(n) + " 点云点数=" +
-             std::to_string(point_count));
+    AlgoDebug("计算结束 返回=" + std::to_string(n) + " 点数=" + std::to_string(point_count));
 
     std::size_t fit_n = 0;
     if (n > 0 && point_count > 0) {
@@ -590,8 +589,8 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
                              gray_cam_index >= 0 ? gray_cam_index : 0, vis);
     }
 
-    AlgoInfo("计算完成 检出=" + std::to_string(ok_n) + "/" + std::to_string(log_count) +
-             " 簇数=" + std::to_string(PCP_GetClusterCount(proc)));
+    // 成功汇总由 online_service 打一条；此处仅 debug
+    AlgoDebug("计算完成 检出=" + std::to_string(ok_n) + "/" + std::to_string(log_count));
 
     if (GetAlgoLogLevel() >= LogLevel::kDebug) {
       for (std::size_t i = 0; i < log_count; ++i) {

@@ -136,7 +136,7 @@ int main(int argc, char* argv[]) {
   if (!server.listen(QStringLiteral("VisualSystemApp"))) {
     visual::EventBus::Instance().NotifyLog(
         visual::LogSeverity::kWarning,
-        QStringLiteral("单实例激活通道监听失败: %1").arg(server.errorString()));
+        QStringLiteral("软件已在运行，辅助通道启动失败：%1").arg(server.errorString()));
   }
 
   StartupSplash splash;
@@ -150,15 +150,10 @@ int main(int argc, char* argv[]) {
   const bool simulation_mode = visual::IsSimulationMode(settings);
   visual::SetSimulationProfile(simulation_mode, settings.simulation.algo_result);
   visual::EventBus::Instance().NotifyLog(
-      QStringLiteral("运行模式=%1  R05=%2  R09=%3")
-          .arg(QString::fromUtf8(visual::RunModeToString(settings.run_mode)))
+      QStringLiteral("当前模式：%1；R05 %2，R09 %3")
+          .arg(simulation_mode ? QStringLiteral("仿真") : QStringLiteral("正式生产"))
           .arg(settings.station_r05.enabled ? QStringLiteral("启用") : QStringLiteral("停用"))
           .arg(settings.station_r09.enabled ? QStringLiteral("启用") : QStringLiteral("停用")));
-  if (simulation_mode) {
-    visual::EventBus::Instance().NotifyLog(QStringLiteral("当前为仿真模式"));
-  } else {
-    visual::EventBus::Instance().NotifyLog(QStringLiteral("当前为实机模式"));
-  }
 
   // 工位相机配置交叉校验
   for (const auto& id : settings.station_r05.camera_ids) {
@@ -166,7 +161,7 @@ int main(int argc, char* argv[]) {
         visual::AppContext::Instance().Devices().end()) {
       visual::EventBus::Instance().NotifyLog(
           visual::LogSeverity::kWarning,
-          QStringLiteral("配置警告: R05 相机 %1 未在设备列表中").arg(QString::fromStdString(id)));
+          QStringLiteral("R05 配置的相机 %1 不在设备名单中").arg(QString::fromStdString(id)));
     }
   }
   for (const auto& id : settings.station_r09.camera_ids) {
@@ -174,12 +169,12 @@ int main(int argc, char* argv[]) {
         visual::AppContext::Instance().Devices().end()) {
       visual::EventBus::Instance().NotifyLog(
           visual::LogSeverity::kWarning,
-          QStringLiteral("配置警告: R09 相机 %1 未在设备列表中").arg(QString::fromStdString(id)));
+          QStringLiteral("R09 配置的相机 %1 不在设备名单中").arg(QString::fromStdString(id)));
     }
   }
 
   visual::EventBus::Instance().NotifyLog(
-      QStringLiteral("存图 深度=%1 点云=%2 灰度=%3 保留=%4天")
+      QStringLiteral("存图：深度%1，点云%2，灰度%3；数据保留 %4 天")
           .arg(settings.stub_save_depth ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.stub_save_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
           .arg(settings.stub_save_gray ? QStringLiteral("开") : QStringLiteral("关"))
@@ -209,10 +204,10 @@ int main(int argc, char* argv[]) {
     // 先于算法进程建映射，保证尺寸按 transferDepth/Pointcloud 申请
     if (!algo_pool->Start()) {
       visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
-                                             QStringLiteral("算法 SHM 映射失败"));
+                                             QStringLiteral("算法通信准备失败"));
     }
     visual::EventBus::Instance().NotifyLog(
-        QStringLiteral("算法共享内存通道已配置 transferDepth=%1 transferPointcloud=%2 transferGray=%3")
+        QStringLiteral("算法通信已准备：深度%1，点云%2，灰度%3")
             .arg(settings.algo_transfer_depth ? QStringLiteral("开") : QStringLiteral("关"))
             .arg(settings.algo_transfer_pointcloud ? QStringLiteral("开") : QStringLiteral("关"))
             .arg(settings.algo_transfer_gray ? QStringLiteral("开") : QStringLiteral("关")));
@@ -240,9 +235,9 @@ int main(int argc, char* argv[]) {
                                          settings.simulation.algo_result);
     if (!algo_process_manager->Start()) {
       visual::EventBus::Instance().NotifyLog(visual::LogSeverity::kWarning,
-                                             QStringLiteral("算法进程管理器启动失败"));
+                                             QStringLiteral("算法程序启动失败"));
     } else {
-      visual::EventBus::Instance().NotifyLog(QStringLiteral("等待算法通道就绪…"));
+      visual::EventBus::Instance().NotifyLog(QStringLiteral("正在等待算法就绪…"));
       SplashStatus(&splash, QStringLiteral("正在等待算法通道就绪"));
       const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 30000;
       while (!visual::EventBus::IsAlgoProcessReady() &&
@@ -251,7 +246,7 @@ int main(int argc, char* argv[]) {
         QThread::msleep(40);
       }
       if (visual::EventBus::IsAlgoProcessReady()) {
-        visual::EventBus::Instance().NotifyLog(QStringLiteral("算法通道已就绪，开始连接相机"));
+        visual::EventBus::Instance().NotifyLog(QStringLiteral("算法已就绪，开始连接相机"));
       } else {
         visual::EventBus::Instance().NotifyLog(
             visual::LogSeverity::kWarning,
@@ -282,7 +277,7 @@ int main(int argc, char* argv[]) {
     engine->RegisterCamera(kv.second.id, cam);
     visual::EventBus::Instance().NotifyCameraStatus(QString::fromStdString(kv.second.id), ok);
     visual::EventBus::Instance().NotifyLog(
-        QStringLiteral("相机连接 %1 序列号=%2 %3%4")
+        QStringLiteral("相机 %1（序列号 %2）连接%3%4")
             .arg(QString::fromStdString(kv.second.id))
             .arg(QString::fromStdString(kv.second.serial))
             .arg(ok ? QStringLiteral("成功") : QStringLiteral("失败"))
@@ -295,22 +290,21 @@ int main(int argc, char* argv[]) {
       if (recipe_path.empty()) {
         visual::EventBus::Instance().NotifyLog(
             visual::LogSeverity::kWarning,
-            QStringLiteral("默认配方跳过: 相机 %1 无序列号")
+            QStringLiteral("相机 %1 无序列号，跳过默认配方")
                 .arg(QString::fromStdString(kv.second.id)));
       } else {
         const QString path_q = QString::fromStdString(recipe_path.string());
         if (!std::filesystem::exists(recipe_path)) {
           visual::EventBus::Instance().NotifyLog(
               visual::LogSeverity::kWarning,
-              QStringLiteral("默认配方未找到: 序列号=%1 路径=%2（跳过）")
-                  .arg(sn, path_q));
+              QStringLiteral("未找到相机 %1 的默认配方，已跳过").arg(sn));
         } else if (cam->LoadRecipeFile(recipe_path.string())) {
           visual::EventBus::Instance().NotifyLog(
-              QStringLiteral("默认配方加载成功: 序列号=%1 路径=%2").arg(sn, path_q));
+              QStringLiteral("相机 %1 默认配方加载成功").arg(sn));
         } else {
           visual::EventBus::Instance().NotifyLog(
               visual::LogSeverity::kWarning,
-              QStringLiteral("默认配方加载失败: 序列号=%1 路径=%2").arg(sn, path_q));
+              QStringLiteral("相机 %1 默认配方加载失败：%2").arg(sn, path_q));
         }
       }
     }

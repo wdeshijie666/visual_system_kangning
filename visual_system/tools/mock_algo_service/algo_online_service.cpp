@@ -110,14 +110,14 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
                              static_cast<DWORD>(want_total), shm_name.c_str());
   }
   if (!map) {
-    AlgoError(std::string("[") + tag + "] 共享内存打开/创建失败 openErr=" + std::to_string(open_err) +
-              " createErr=" + std::to_string(GetLastError()) + " name=" + shm_name);
+    AlgoError(std::string("[") + tag + "] 与主程序通信失败，无法启动");
+    (void)open_err;
     return 1;
   }
   auto* header = static_cast<visual::shm::ShmHeader*>(
       MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0));
   if (!header) {
-    AlgoError(std::string("[") + tag + "] 共享内存映射失败 err=" + std::to_string(GetLastError()));
+    AlgoError(std::string("[") + tag + "] 与主程序通信失败，无法启动");
     CloseHandle(map);
     return 1;
   }
@@ -135,7 +135,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
   const char* event_name = visual::shm::EventNameForChannel(channel);
   HANDLE evt = CreateEventA(nullptr, FALSE, FALSE, event_name);
   if (!mtx || !evt) {
-    AlgoError(std::string("[") + tag + "] 互斥量/事件创建失败");
+    AlgoError(std::string("[") + tag + "] 通信同步准备失败");
     return 1;
   }
 
@@ -164,10 +164,13 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
   const std::filesystem::path exe_dir = std::filesystem::path(module_path).parent_path();
 
   {
+    // 保留 CHANNEL_READY 供主程序识别就绪；其余对人话说明。
     std::ostringstream oss;
-    oss << "[" << tag << "] 通道已就绪 CHANNEL_READY shm=" << shm_name
-        << " attached=" << (open_err == 0 ? 1 : 0) << " arena=" << blob_arena_size << "B";
+    oss << "[" << tag << "] 工位通道已就绪 CHANNEL_READY";
     AlgoInfo(oss.str());
+    (void)shm_name;
+    (void)open_err;
+    (void)blob_arena_size;
   }
 
 #if defined(VS_HAS_POINTCLOUD_ALGO)
@@ -187,7 +190,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
     }
 
     if (!WaitShmMutex(mtx, 1000)) {
-      AlgoWarn(std::string("[") + tag + "] 已见到 Posted 但互斥量等待失败，重试");
+      AlgoWarn(std::string("[") + tag + "] 忙碌冲突，稍后重试");
       continue;
     }
     if (header->state == visual::shm::State::kRequestPosted) {
@@ -197,21 +200,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
         blob_arena_size = static_cast<std::size_t>(header->blob_arena_bytes);
       }
       header->state = visual::shm::State::kBusy;
-      const std::int32_t station = header->station_id;
-      std::uint32_t depth_w = 0;
-      std::uint32_t depth_h = 0;
-      if (header->camera_count > 0) {
-        depth_w = header->cameras[0].depth.width;
-        depth_h = header->cameras[0].depth.height;
-      }
       ReleaseMutex(mtx);
-
-      {
-        std::ostringstream oss;
-        oss << "[" << tag << "] 收到请求 序号=" << work_seq << " 工位=" << station
-            << " 深度=" << depth_w << "x" << depth_h << " arena=" << blob_arena_size;
-        AlgoInfo(oss.str());
-      }
 
       std::string input_error;
       bool input_ok = false;
@@ -232,7 +221,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
       if (!input_ok) {
         std::strncpy(header->error_message, input_error.c_str(), sizeof(header->error_message) - 1);
         header->state = visual::shm::State::kError;
-        AlgoError(std::string("[") + tag + "] 输入准备失败: " + input_error);
+        AlgoError(std::string("[") + tag + "] 图像准备失败");
         ReleaseMutex(mtx);
         continue;
       }
@@ -256,8 +245,6 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
           bool algo_ok = false;
           try {
             // 暂不加全局锁：R05/R09 可并行 process（各通道独立引擎实例，配置可不同）。
-            AlgoInfo(std::string("[") + tag + "] 开始计算 config=" + pc.point_cloud_config +
-                     " topN=" + std::to_string(pc.point_cloud_top_n));
             algo_ok = RunPointCloudFromShm(header, blob_arena, blob_arena_size, config, exe_dir,
                                            header->logs, visual::shm::kLogCount, &algo_error,
                                            processor_slot, &pc);
@@ -276,7 +263,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
             continue;
           }
           if (!algo_ok) {
-            AlgoError(std::string("[") + tag + "] 计算失败: " + algo_error);
+            AlgoError(std::string("[") + tag + "] 计算失败");
             std::strncpy(header->error_message, algo_error.c_str(),
                          sizeof(header->error_message) - 1);
             header->state = visual::shm::State::kError;
@@ -314,9 +301,9 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
         }
       }
       {
+        // 每周期成功只打一条；细节留给主程序界面汇总
         std::ostringstream oss;
-        oss << "[" << tag << "] 本周期完成 序号=" << header->seq_id << " 合格=" << ok_n << "/"
-            << visual::shm::kLogCount;
+        oss << "[" << tag << "] 本轮计算完成：合格 " << ok_n << "/" << visual::shm::kLogCount;
         AlgoInfo(oss.str());
       }
       header->state = visual::shm::State::kDone;
@@ -337,8 +324,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
 int RunOnlineService(const AlgoConfig& config) {
 #ifdef _WIN32
   SetAlgoLogLevel(config.log_level);
-  AlgoInfo(config.pipeline_simulation.enabled ? "算法服务已启动（通路仿真）"
-                                              : "算法服务已启动");
+  AlgoInfo(config.pipeline_simulation.enabled ? "算法已启动（仿真结果）" : "算法已启动");
   if (config.debug_save_depth || config.debug_save_pointcloud) {
     AlgoDebug(std::string("调试落盘 深度=") + (config.debug_save_depth ? "开" : "关") +
               " 点云=" + (config.debug_save_pointcloud ? "开" : "关"));
