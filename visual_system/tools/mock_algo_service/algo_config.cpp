@@ -158,6 +158,8 @@ AlgoConfig LoadAlgoConfig(const std::filesystem::path& exe_dir) {
   config.transfer_depth = j.value("transferDepth", config.transfer_depth);
   config.transfer_pointcloud = j.value("transferPointcloud", config.transfer_pointcloud);
   config.transfer_gray = j.value("transferGray", config.transfer_gray);
+  config.reference_point_config =
+      j.value("referencePointConfig", config.reference_point_config);
   config.temp_force_depth_tiff = j.value("tempForceDepthTiff", config.temp_force_depth_tiff);
   config.log_level = ParseLogLevel(j.value("logLevel", std::string("info")));
 

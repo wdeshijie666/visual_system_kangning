@@ -3,7 +3,8 @@
  * @brief 点云算法：SHM / 离线 session 深度 / 临时 TIFF → 按工位配置创建的 PointCloudProcessor → 5 条结果。
  *
  * SHM 深度单位为米，固定换算为毫米后再计算；磁盘 TIFF/PGM（含历史回放）已是毫米。
- * PointCloudProcessor 配置文件与 topN 取自 algo_config.json 的 channels.r05/r09。
+ * PointCloudProcessor 配置与 topN 取自 algo_config.json 的 channels.r05/r09；
+ * 参考点 JSON 取自顶层 referencePointConfig（两工位共用）。
  */
 #include "algo_pointcloud_runner.h"
 
@@ -376,6 +377,46 @@ std::filesystem::path ResolvePointCloudConfig(const PointCloudAlgoOptions& pc,
   return exe_dir / "config.json";
 }
 
+/** 两工位共用参考点；相对路径相对算法 exe 目录解析。 */
+std::filesystem::path ResolveReferencePointConfig(const AlgoConfig& config,
+                                                  const std::filesystem::path& exe_dir) {
+  const std::string& configured = config.reference_point_config;
+  if (!configured.empty()) {
+    std::filesystem::path p(configured);
+    if (p.is_absolute()) {
+      return p;
+    }
+    return exe_dir / p;
+  }
+  return exe_dir / "reference_point.json";
+}
+
+/**
+ * 创建引擎：点云参数文件必须存在；参考点文件缺失只警告，仍构造（库默认约 0,0,0）。
+ */
+PointCloudProcessorPtr CreateProcessorWithReference(const std::filesystem::path& cfg_path,
+                                                    const std::filesystem::path& ref_path,
+                                                    std::string* error) {
+  if (!std::filesystem::exists(cfg_path)) {
+    if (error) {
+      *error = "算法配置文件缺失: " + cfg_path.string();
+    }
+    return nullptr;
+  }
+  if (!std::filesystem::exists(ref_path)) {
+    AlgoWarn("参考点文件缺失，将使用算法库默认参考点: " + ref_path.string());
+  }
+  std::string create_error;
+  auto proc = CreatePointCloudProcessorProtected(cfg_path.string(), ref_path.string(), &create_error);
+  if (!proc) {
+    if (error) {
+      *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
+    }
+    return nullptr;
+  }
+  return proc;
+}
+
 }  // namespace
 
 bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,
@@ -454,6 +495,7 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
   }
 
   const auto cfg_path = ResolvePointCloudConfig(pc, exe_dir);
+  const auto ref_path = ResolveReferencePointConfig(config, exe_dir);
   PointCloudProcessorPtr owned;
   PointCloudProcessor* proc = nullptr;
 
@@ -496,39 +538,18 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
         return false;
       }
       if (slot->processor == nullptr) {
-        if (!std::filesystem::exists(cfg_path)) {
-          if (error) {
-            *error = "算法配置文件缺失: " + cfg_path.string();
-          }
-          return false;
-        }
-        std::string create_error;
-        slot->processor = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
+        slot->processor = CreateProcessorWithReference(cfg_path, ref_path, error);
         if (!slot->processor) {
-          if (error) {
-            *error =
-                create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
-          }
           return false;
         }
         slot->last_depth_w = depth.cols;
         slot->last_depth_h = depth.rows;
-        AlgoDebug("已加载算法参数: " + cfg_path.string());
+        AlgoDebug("已加载算法参数: " + cfg_path.string() + "；参考点: " + ref_path.string());
       }
       proc = slot->processor.get();
     } else {
-      if (!std::filesystem::exists(cfg_path)) {
-        if (error) {
-          *error = "算法配置文件缺失: " + cfg_path.string();
-        }
-        return false;
-      }
-      std::string create_error;
-      owned = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
+      owned = CreateProcessorWithReference(cfg_path, ref_path, error);
       if (!owned) {
-        if (error) {
-          *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
-        }
         return false;
       }
       proc = owned.get();

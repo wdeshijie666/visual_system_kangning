@@ -41,8 +41,8 @@ cmake --build visual_system/build --config Release --target VisualSystem
 |------|------|--------|
 | `gateway` | PLC IP（**必填非空**，否则 `TryConnectPlc` 失败） | `192.168.1.10` |
 | `path` | CIP 路径（背板+槽位） | `1,0` |
-| `tags.cameraToPlc` | 视觉→PLC DINT[100] | `CameraToPLC_Int` |
-| `tags.plcToCamera` | PLC→视觉 DINT[100] | `PLCToCamera_Int` |
+| `tags.cameraToPlc` | 视觉→PLC INT[100] | `CameraToPLC_Int` |
+| `tags.plcToCamera` | PLC→视觉 INT[100] | `PLCToCamera_Int` |
 
 `timeout_ms` 代码默认 5000，暂未从 JSON 读取。
 
@@ -50,7 +50,7 @@ cmake --build visual_system/build --config Release --target VisualSystem
 
 ### 3. PLC 程序侧
 
-- Controller Tag：`CameraToPLC_Int`、`PLCToCamera_Int`，类型 **DINT[100]**（Logix / `cpu=lgx`）。
+- Controller Tag：`CameraToPLC_Int`、`PLCToCamera_Int`，类型 **INT[100]**（Logix / `cpu=lgx`，与现场一致）。
 - 位与结果区见 [`plc_field_map.md`](./plc_field_map.md)（触发 `[0].1`/`.2`，结果 R05=10..39、R07=40..69、R09=70..99）。
 - PC ↔ PLC EtherNet/IP 互通；防火墙放行。
 - 协议：视觉写心跳 `[0].0`（2s）；PLC 负责除心跳外对 `CameraToPLC` 清零（按接口约定）。

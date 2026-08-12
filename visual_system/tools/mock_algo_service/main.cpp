@@ -42,6 +42,7 @@ int main() {
 
   algo::AlgoInfo(std::string("R05 参数文件：") + config.channel_r05.point_cloud.point_cloud_config);
   algo::AlgoInfo(std::string("R09 参数文件：") + config.channel_r09.point_cloud.point_cloud_config);
+  algo::AlgoInfo(std::string("共用参考点文件：") + config.reference_point_config);
 
   if (config.mode == algo::RunMode::kOfflineReplay) {
     algo::AlgoInfo("当前为历史回放模式");

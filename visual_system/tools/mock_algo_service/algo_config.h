@@ -65,6 +65,11 @@ struct AlgoConfig {
    */
   PointCloudAlgoOptions point_cloud_defaults;
   /**
+   * 两工位共用参考点 JSON（相对算法 exe 目录或绝对路径）。
+   * 缺文件时仍构造引擎，由算法库使用默认参考点。
+   */
+  std::string reference_point_config = "reference_point.json";
+  /**
    * 临时：非空时用该 TIFF（毫米）代替 SHM 深度（两工位共用调试开关）。
    */
   std::string temp_force_depth_tiff;

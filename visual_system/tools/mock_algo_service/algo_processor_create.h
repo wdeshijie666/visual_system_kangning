@@ -20,9 +20,13 @@ struct PointCloudProcessorDeleter {
 
 using PointCloudProcessorPtr = std::unique_ptr<PointCloudProcessor, PointCloudProcessorDeleter>;
 
-/** 构造引擎；失败返回空并写入 error。 */
-PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& config_path,
-                                                          std::string* error);
+/**
+ * 构造引擎；失败返回空并写入 error。
+ * @param reference_point_path 参考点 JSON；空则交给算法库默认（通常为同目录
+ *        reference_point.json）。文件可不存在，库侧会用默认参考点。
+ */
+PointCloudProcessorPtr CreatePointCloudProcessorProtected(
+    const std::string& config_path, const std::string& reference_point_path, std::string* error);
 
 bool PCP_LoadDepthMap(PointCloudProcessor* p, const cv::Mat& depth);
 std::size_t PCP_GetPointCount(PointCloudProcessor* p);
