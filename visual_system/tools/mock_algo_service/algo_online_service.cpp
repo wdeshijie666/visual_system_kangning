@@ -244,7 +244,7 @@ int RunOnlineServiceForChannel(const AlgoConfig& config, visual::shm::ShmChannel
         if (pc.use_point_cloud_algo) {
           bool algo_ok = false;
           try {
-            // 暂不加全局锁：R05/R09 可并行 process（各通道独立引擎实例，配置可不同）。
+            // 暂不加全局锁：R05/R09 可并行 process（各通道独立槽，每周期各自重建引擎）。
             algo_ok = RunPointCloudFromShm(header, blob_arena, blob_arena_size, config, exe_dir,
                                            header->logs, visual::shm::kLogCount, &algo_error,
                                            processor_slot, &pc);
@@ -331,7 +331,7 @@ int RunOnlineService(const AlgoConfig& config) {
   }
 
 #if defined(VS_HAS_POINTCLOUD_ALGO)
-  // R05/R09 各一实例；暂不串行化 process，便于双工位并行压测。
+  // R05/R09 各一槽；每周期在 runner 内重建引擎，便于热加载配置。
   PointCloudProcessorSlot slot_r05;
   PointCloudProcessorSlot slot_r09;
 

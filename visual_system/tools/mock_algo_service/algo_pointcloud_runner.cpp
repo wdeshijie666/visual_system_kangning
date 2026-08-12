@@ -529,23 +529,13 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
               " 有效像素=" + std::to_string(positive_depth));
 
     if (slot != nullptr) {
-      if (slot->processor != nullptr &&
-          (slot->last_depth_w != depth.cols || slot->last_depth_h != depth.rows)) {
-        // 运行中不析构旧实例；分辨率变化时请重启算法进程。
-        if (error) {
-          *error = "深度分辨率变化，请重启算法进程";
-        }
+      // 每周期重建：点云参数与参考点在构造函数中刷新，支持现场热改配置。
+      slot->processor.reset();
+      slot->processor = CreateProcessorWithReference(cfg_path, ref_path, error);
+      if (!slot->processor) {
         return false;
       }
-      if (slot->processor == nullptr) {
-        slot->processor = CreateProcessorWithReference(cfg_path, ref_path, error);
-        if (!slot->processor) {
-          return false;
-        }
-        slot->last_depth_w = depth.cols;
-        slot->last_depth_h = depth.rows;
-        AlgoDebug("已加载算法参数: " + cfg_path.string() + "；参考点: " + ref_path.string());
-      }
+      AlgoDebug("本周期已重建算法引擎: " + cfg_path.string() + "；参考点: " + ref_path.string());
       proc = slot->processor.get();
     } else {
       owned = CreateProcessorWithReference(cfg_path, ref_path, error);
