@@ -19,6 +19,7 @@
 
 #include "visual/app_context.h"
 #include "visual/cycle_job_queue.h"
+#include "visual/event_bus.h"
 #include "visual/fault_breaker.h"
 #include "visual/i_algo_service.h"
 #include "visual/i_camera_3d.h"
@@ -65,14 +66,24 @@ class SequenceEngine {
    * 离线测试（实时采图）：跳过 PLC 触发，仍走在线 SHM + 写 PLC。
    * 引擎运行中禁止调用。
    * 可由 UI 后台线程调用；同工位与产线 Worker 通过 CycleMutex 互斥。
+   * @param out_event 非空时回填本周期结果（不影响 EventBus 通知）。
    */
-  bool RunOfflineCycle(StationId station);
+  bool RunOfflineCycle(StationId station, CycleResultEvent* out_event = nullptr);
 
   /**
    * 历史数据回放：不采图，算法走 kOfflinePath，不写 PLC。
    * 可由 UI 后台线程调用；同工位互斥同上。
+   * @param out_event 非空时回填本周期结果。
    */
-  bool RunReplayCycle(StationId station, const std::string& session_dir);
+  bool RunReplayCycle(StationId station, const std::string& session_dir,
+                      CycleResultEvent* out_event = nullptr);
+
+  /**
+   * 指定单个深度文件回放（session 为文件所在目录；供重复精度批量扫盘）。
+   * 不改变其它回放默认选文件逻辑。
+   */
+  bool RunReplayDepthFile(StationId station, const std::string& depth_file_path,
+                          CycleResultEvent* out_event = nullptr);
 
  private:
   struct CycleOptions {
@@ -88,6 +99,8 @@ class SequenceEngine {
      */
     bool single_station_only = false;
     bool update_fault_breaker = true;
+    /** 非空时离线回放强制使用该深度文件，忽略目录内自动挑选。 */
+    std::string force_depth_path;
   };
 
   struct PendingCycle {
@@ -109,7 +122,8 @@ class SequenceEngine {
   /** R09 通道周期消费者。 */
   void CycleWorkerLoopR09();
 
-  bool RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options);
+  bool RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options,
+                CycleResultEvent* out_event = nullptr);
 
   IAlgoService* ResolveAlgo(StationId station);
   std::mutex& CycleMutexFor(StationId station);

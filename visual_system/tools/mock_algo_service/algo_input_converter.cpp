@@ -225,7 +225,14 @@ bool PrepareAlgoInputFromShm(const visual::shm::ShmHeader* header, const std::ui
   return true;
 }
 
-bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string* error) {
+bool ResolveOfflineDepthPath(const visual::shm::ShmHeader* header, std::filesystem::path* out_path,
+                             std::string* error) {
+  if (out_path == nullptr) {
+    if (error != nullptr) {
+      *error = "out_path is null";
+    }
+    return false;
+  }
   if (header == nullptr) {
     if (error != nullptr) {
       *error = "请求无效";
@@ -234,21 +241,30 @@ bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string
   }
   if (header->session_dir[0] == '\0') {
     if (error != nullptr) {
-      *error = "回放目录为空";
+      *error = "回放路径为空";
     }
     return false;
   }
 
-  const std::filesystem::path session_dir(header->session_dir);
-  const std::string station_tag = StationTagFromShmId(header->station_id);
-  const std::string camera_id = FirstCameraIdFromHeader(header);
-
-  std::filesystem::path depth_path;
-  if (!FindDepthFileInSession(session_dir, station_tag, camera_id, &depth_path, error)) {
-    return false;
+  const std::filesystem::path session_or_file(header->session_dir);
+  std::error_code ec;
+  // session_dir 字段可承载「目录」或「强制深度文件」；文件存在则直接使用。
+  if (std::filesystem::is_regular_file(session_or_file, ec) && !ec) {
+    *out_path = session_or_file;
+    return true;
   }
 
-  AlgoInfo(std::string("离线回放目录: ") + header->session_dir + " 深度=" + depth_path.string());
+  const std::string station_tag = StationTagFromShmId(header->station_id);
+  const std::string camera_id = FirstCameraIdFromHeader(header);
+  return FindDepthFileInSession(session_or_file, station_tag, camera_id, out_path, error);
+}
+
+bool PrepareAlgoInputFromPaths(const visual::shm::ShmHeader* header, std::string* error) {
+  std::filesystem::path depth_path;
+  if (!ResolveOfflineDepthPath(header, &depth_path, error)) {
+    return false;
+  }
+  AlgoInfo(std::string("离线回放深度: ") + depth_path.string());
   return true;
 }
 

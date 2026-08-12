@@ -60,6 +60,7 @@ class MainWindow : public QMainWindow {
   void OnResetWindowLayout();
   void OnReplayR05();
   void OnReplayR09();
+  void OnRepeatabilityTest();
   void OnOpen2DCameraImport();
   void TryAutoStartEngine();
 
@@ -127,6 +128,7 @@ class MainWindow : public QMainWindow {
   QMenu* offline_menu_ = nullptr;
   QAction* replay_r05_action_ = nullptr;
   QAction* replay_r09_action_ = nullptr;
+  QAction* repeatability_action_ = nullptr;
   QPushButton* start_engine_button_ = nullptr;
   QPushButton* stop_engine_button_ = nullptr;
 };

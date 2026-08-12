@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <thread>
 
 #include "visual/alarm_service.h"
@@ -372,7 +373,7 @@ bool SequenceEngine::IsRunning() const {
   return running_.load();
 }
 
-bool SequenceEngine::RunOfflineCycle(StationId station) {
+bool SequenceEngine::RunOfflineCycle(StationId station, CycleResultEvent* out_event) {
   if (IsRunning()) {
     EventBus::Instance().NotifyLog(LogSeverity::kWarning,
                                    QStringLiteral("请先停止产线，再进行手动运行"));
@@ -388,10 +389,11 @@ bool SequenceEngine::RunOfflineCycle(StationId station) {
   options.update_fault_breaker = false;
   EventBus::Instance().NotifyLog(
       QStringLiteral("%1 手动运行开始").arg(QString::fromUtf8(StationLabel(station))));
-  return RunCycle(station, cfg, options);
+  return RunCycle(station, cfg, options, out_event);
 }
 
-bool SequenceEngine::RunReplayCycle(StationId station, const std::string& session_dir) {
+bool SequenceEngine::RunReplayCycle(StationId station, const std::string& session_dir,
+                                    CycleResultEvent* out_event) {
   if (IsRunning()) {
     EventBus::Instance().NotifyLog(LogSeverity::kWarning,
                                    QStringLiteral("请先停止产线，再进行历史回放"));
@@ -409,7 +411,31 @@ bool SequenceEngine::RunReplayCycle(StationId station, const std::string& sessio
   options.write_plc = false;
   options.replay_session_dir = session_dir;
   options.algo_result_suffix = "replay_algo_result";
-  return RunCycle(station, cfg, options);
+  return RunCycle(station, cfg, options, out_event);
+}
+
+bool SequenceEngine::RunReplayDepthFile(StationId station, const std::string& depth_file_path,
+                                        CycleResultEvent* out_event) {
+  if (IsRunning()) {
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning,
+                                   QStringLiteral("请先停止产线，再进行历史回放"));
+    return false;
+  }
+  if (depth_file_path.empty() || !std::filesystem::exists(depth_file_path)) {
+    EventBus::Instance().NotifyLog(LogSeverity::kWarning,
+                                   QStringLiteral("回放失败：深度文件不存在"));
+    return false;
+  }
+  const std::string session_dir = std::filesystem::path(depth_file_path).parent_path().string();
+  const auto& settings = AppContext::Instance().Settings();
+  StationConfig cfg = (station == StationId::kR09) ? settings.station_r09 : settings.station_r05;
+  CycleOptions options;
+  options.capture_live = false;
+  options.write_plc = false;
+  options.replay_session_dir = session_dir;
+  options.force_depth_path = depth_file_path;
+  options.algo_result_suffix = "replay_algo_result";
+  return RunCycle(station, cfg, options, out_event);
 }
 
 void SequenceEngine::StartDeviceHealthMonitor() {
@@ -666,7 +692,8 @@ void SequenceEngine::CycleWorkerLoopR09() {
   }
 }
 
-bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options) {
+bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, const CycleOptions& options,
+                              CycleResultEvent* out_event) {
   // 同工位互斥：在线 Worker 与 UI 离线/回放不会同时采同一相机、踩同一 SHM
   std::lock_guard<std::mutex> cycle_lock(CycleMutexFor(station));
 
@@ -800,9 +827,14 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     for (const auto& cam_id : station_cfg.camera_ids) {
       CaptureBundle bundle;
       bundle.camera_serial = cam_id;
-      bundle.depth_path =
-          FindDepthImageInSession(record_ctx.output_dir, record_ctx.station_tag, cam_id);
-      bundle.ok = !bundle.depth_path.empty();
+      if (!options.force_depth_path.empty()) {
+        // 精度测试等批量扫盘：强制指定深度文件，避免目录内多文件时挑错
+        bundle.depth_path = options.force_depth_path;
+      } else {
+        bundle.depth_path =
+            FindDepthImageInSession(record_ctx.output_dir, record_ctx.station_tag, cam_id);
+      }
+      bundle.ok = !bundle.depth_path.empty() && std::filesystem::exists(bundle.depth_path);
       if (!bundle.ok) {
         capture_ok = false;
       }
@@ -847,6 +879,9 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
     ev.plc_ok = plc_ok;
     ev.algo_ok = false;
     EventBus::Instance().NotifyCycleCompleted(ev);
+    if (out_event != nullptr) {
+      *out_event = ev;
+    }
     EventBus::Instance().NotifyLog(
         LogSeverity::kWarning,
         QStringLiteral("%1 本轮中止：拍照失败")
@@ -965,6 +1000,9 @@ bool SequenceEngine::RunCycle(StationId station, StationConfig station_cfg, cons
   ev.plc_ok = plc_ok;
   ev.algo_ok = algo_ok;
   EventBus::Instance().NotifyCycleCompleted(ev);
+  if (out_event != nullptr) {
+    *out_event = ev;
+  }
 
   const QString mode = options.capture_live
                            ? (IsSimulationMode(AppContext::Instance().Settings())

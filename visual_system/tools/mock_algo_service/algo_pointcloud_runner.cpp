@@ -449,12 +449,9 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
     AlgoDebug("使用临时深度图: " + config.temp_force_depth_tiff);
   } else if (offline_path) {
-    // 历史回放：只读磁盘，不走 SHM blob，避免影响在线 PickFirstDepth 通路
-    const std::filesystem::path session_dir(header->session_dir);
-    const std::string station_tag = StationTagFromShmId(header->station_id);
-    const std::string camera_id = FirstCameraIdFromHeader(header);
+    // 历史回放：只读磁盘；session_dir 可能是目录或强制指定的深度文件路径
     std::filesystem::path depth_path;
-    if (!FindDepthFileInSession(session_dir, station_tag, camera_id, &depth_path, error)) {
+    if (!ResolveOfflineDepthPath(header, &depth_path, error)) {
       return false;
     }
     if (!LoadDepthTiffFile(depth_path, &depth, error)) {
@@ -462,8 +459,23 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
     AlgoInfo("离线深度已加载: " + depth_path.string());
 
+    // 灰度：优先同前缀 _gray.；否则按父目录旧规则扫描
     std::filesystem::path gray_path;
-    if (FindGrayFileInSession(session_dir, station_tag, camera_id, &gray_path)) {
+    const std::string depth_name = depth_path.filename().string();
+    const auto pos = depth_name.find("_depth.");
+    if (pos != std::string::npos) {
+      const std::string gray_name = depth_name.substr(0, pos) + "_gray.pgm";
+      const auto candidate = depth_path.parent_path() / gray_name;
+      if (std::filesystem::exists(candidate)) {
+        gray_path = candidate;
+      }
+    }
+    if (gray_path.empty()) {
+      const std::string station_tag = StationTagFromShmId(header->station_id);
+      const std::string camera_id = FirstCameraIdFromHeader(header);
+      FindGrayFileInSession(depth_path.parent_path(), station_tag, camera_id, &gray_path);
+    }
+    if (!gray_path.empty()) {
       if (LoadGrayImageFile(gray_path, &offline_gray)) {
         AlgoDebug("离线灰度已加载: " + gray_path.string());
       }

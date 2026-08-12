@@ -31,7 +31,7 @@ cmake --build build --config Release
 
 1. 编辑运行目录下 `config/setting.json`（构建后自动拷贝）。
 2. 启动 `SmartGuide.exe`，工具栏点 **启动** 开始 PLC 轮询与心跳。
-3. 离线测试：状态栏 **离线跑 R05/R09 工位**。
+3. 离线测试：状态栏 **离线跑 R05/R09 工位**；菜单 **离线测试 → 重复精度测试** 可做实机连拍或离线扫深度文件统计极值。
 4. 使用 SHM 算法时：先启动 `mock_algo_service.exe`，`setting.json` 设 `"useShm": true`。
 
 ## 文档

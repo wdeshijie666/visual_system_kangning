@@ -12,6 +12,7 @@ set(_vs_app_sources
   src/camera_recipe_paths.cpp
   src/viewport_widget.cpp
   src/offline_test_widget.cpp
+  src/repeatability_test_dialog.cpp
 )
 
 set(_vs_app_headers
@@ -24,6 +25,7 @@ set(_vs_app_headers
   include/camera_recipe_paths.h
   include/viewport_widget.h
   include/offline_test_widget.h
+  include/repeatability_test_dialog.h
 )
 
 if(WIN32)
