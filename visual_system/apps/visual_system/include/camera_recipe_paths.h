@@ -9,7 +9,7 @@
 
 namespace visual {
 
-/** VisualSystem.exe 所在目录。 */
+/** SmartGuide.exe（应用）所在目录。 */
 std::filesystem::path ResolveHostExeDir();
 
 /**

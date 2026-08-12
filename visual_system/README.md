@@ -24,13 +24,13 @@ cmake --build build --config Release
 
 输出：
 
-- `build/apps/visual_system/Release/VisualSystem.exe`
+- `build/apps/visual_system/Release/SmartGuide.exe`（CMake 目标名仍为 `VisualSystem`）
 - `build/tools/mock_algo_service/Release/mock_algo_service.exe`
 
 ## 运行
 
 1. 编辑运行目录下 `config/setting.json`（构建后自动拷贝）。
-2. 启动 `VisualSystem.exe`，工具栏点 **启动** 开始 PLC 轮询与心跳。
+2. 启动 `SmartGuide.exe`，工具栏点 **启动** 开始 PLC 轮询与心跳。
 3. 离线测试：状态栏 **离线跑 R05/R09 工位**。
 4. 使用 SHM 算法时：先启动 `mock_algo_service.exe`，`setting.json` 设 `"useShm": true`。
 

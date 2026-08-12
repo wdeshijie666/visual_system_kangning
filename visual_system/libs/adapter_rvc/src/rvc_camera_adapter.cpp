@@ -444,7 +444,7 @@ std::shared_ptr<PointCloudBuffer> MakeStubPointCloudBuffer() {
   return pc;
 }
 
-/** VisualSystem.exe 所在目录（仿真 TIFF 固定相对此目录）。 */
+/** SmartGuide.exe 所在目录（仿真 TIFF 固定相对此目录）。 */
 fs::path ResolveHostExeDir() {
 #ifdef _WIN32
   char buf[MAX_PATH] = {};

@@ -15,7 +15,7 @@ struct StubCameraOptions {
   int image_height = 2048;
   bool solid_black = true;
   /**
-   * 仿真专用：相对 VisualSystem.exe 目录的深度 TIFF 文件名。
+   * 仿真专用：相对 SmartGuide.exe 目录的深度 TIFF 文件名。
    * 非空时每次 Capture 固定读该文件写入深度并走 SHM；读失败则本次 Capture 失败（不静默假深度）。
    * 空字符串则退回合成深度。真机 RvcCamera 忽略本字段。
    */

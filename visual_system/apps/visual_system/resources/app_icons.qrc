@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file alias="标题栏/应用Logo.svg">icons/标题栏/应用Logo.svg</file>
+  </qresource>
+</RCC>

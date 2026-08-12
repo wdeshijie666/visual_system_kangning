@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDialog>
 #include <QFile>
+#include <QIcon>
 #include <QFileDialog>
 #include <QFrame>
 #include <QLabel>
@@ -173,6 +174,7 @@ void MainWindow::InitUi() {
   LoadTheme();
   // 标题：左产品名，右公司名（标准标题栏用 "—" 分隔）
   setWindowTitle(QStringLiteral("SmartGuide — TanlyMind"));
+  setWindowIcon(QIcon(QStringLiteral(":/icons/标题栏/应用Logo.svg")));
 
   auto* file_menu = menuBar()->addMenu(tr("文件"));
   file_menu->addAction(tr("退出"), this, &QWidget::close);

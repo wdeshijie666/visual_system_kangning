@@ -23,7 +23,7 @@ set(RVC_LIB_DIR "${RVC_ROOT}/lib" CACHE PATH "RVC.lib directory")
 set(RVC_RUNTIME_DIR "${RVC_ROOT}/runtime" CACHE PATH "Directory containing RVC.dll")
 set(Qt5_DIR "D:/Qt/Qt5.14.2/5.14.2/msvc2017_64/lib/cmake/Qt5" CACHE PATH "")
 
-find_package(Qt5 REQUIRED COMPONENTS Core Widgets Gui Network)
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets Gui Network Svg)
 
 set(AB_PLC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../AB_PLC" CACHE PATH "AB_PLC root")
 set(VISION_PLC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
