@@ -6,6 +6,13 @@
 if(NOT SRC OR NOT DST)
   message(FATAL_ERROR "copy_release_dlls.cmake requires -DSRC= and -DDST=")
 endif()
+
+foreach(_v SRC DST SRC_RELEASE WEBP_RELEASE_DIR)
+  if(DEFINED ${_v})
+    string(REPLACE "\"" "" ${_v} "${${_v}}")
+  endif()
+endforeach()
+
 file(MAKE_DIRECTORY "${DST}")
 
 # ---------------------------------------------------------------------------
@@ -188,6 +195,54 @@ if(NOT EXISTS "${DST}/platform_diag.dll")
       "PointCloudProcessor.dll will fail to load (0xC0000135). "
       "Build SHARED platform_diag into ${SRC} or place the DLL next to the exe.")
   endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# 3.7) VTK 常用伴随库：third_party/bin 多为 Debug CRT，上一步会删掉；
+#      必须从 Release 包补回，否则运行时报缺 pugixml / double-conversion / verdict。
+# ---------------------------------------------------------------------------
+set(_vtk_companion_names pugixml.dll double-conversion.dll verdict.dll)
+get_filename_component(_tp_root_vtk "${SRC}" DIRECTORY)
+get_filename_component(_recon_root_vtk "${_tp_root_vtk}" DIRECTORY)
+set(_vtk_companion_dirs "")
+if(SRC_RELEASE AND EXISTS "${SRC_RELEASE}")
+  list(APPEND _vtk_companion_dirs "${SRC_RELEASE}")
+endif()
+if(WEBP_RELEASE_DIR AND EXISTS "${WEBP_RELEASE_DIR}")
+  list(APPEND _vtk_companion_dirs "${WEBP_RELEASE_DIR}")
+endif()
+list(APPEND _vtk_companion_dirs
+  "${_recon_root_vtk}/third_party_v0/bin/Release"
+  "${_recon_root_vtk}/Decode_0/Release"
+  "${_recon_root_vtk}/Decode/Release"
+  "G:/ReconDLL/third_party_v0/bin/Release"
+  "G:/ReconDLL/Decode_0/Release")
+set(_vtk_comp_n 0)
+foreach(_name IN LISTS _vtk_companion_names)
+  if(EXISTS "${DST}/${_name}")
+    continue()
+  endif()
+  set(_found "")
+  foreach(_dir IN LISTS _vtk_companion_dirs)
+    if(EXISTS "${_dir}/${_name}")
+      set(_found "${_dir}/${_name}")
+      break()
+    endif()
+  endforeach()
+  if(_found)
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${_found}" "${DST}/${_name}")
+    math(EXPR _vtk_comp_n "${_vtk_comp_n}+1")
+    message(STATUS "Deployed Release ${_name} from ${_found}")
+  else()
+    message(WARNING
+      "${_name} missing beside mock_algo_service after Debug-CRT purge; "
+      "VTK/OpenCV may fail to load. Place Release CRT build into SRC_RELEASE "
+      "or G:/ReconDLL/third_party_v0/bin/Release.")
+  endif()
+endforeach()
+if(_vtk_comp_n GREATER 0)
+  message(STATUS "Restored ${_vtk_comp_n} VTK companion DLL(s)")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -124,24 +124,37 @@ if(VS_HAS_POINTCLOUD_ALGO)
     target_compile_options(mock_algo_service PRIVATE /bigobj)
   endif()
 
+  # Release 覆盖源：优先仓库内 overrides，否则用 ReconDLL 已验证的 Release CRT 包
+  set(_algo_src_release "${CMAKE_CURRENT_SOURCE_DIR}/runtime_release_overrides")
+  if(NOT EXISTS "${_algo_src_release}/pugixml.dll")
+    foreach(_cand IN ITEMS
+        "G:/ReconDLL/third_party_v0/bin/Release"
+        "G:/ReconDLL/Decode_0/Release")
+      if(EXISTS "${_cand}/pugixml.dll")
+        set(_algo_src_release "${_cand}")
+        break()
+      endif()
+    endforeach()
+  endif()
+
   add_custom_command(TARGET mock_algo_service POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E remove -f
       "$<TARGET_FILE_DIR:mock_algo_service>/pcp_c_api.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${VS_POINTCLOUD_ROOT}/Release/PointCloudProcessor.dll"
+      "$<IF:$<CONFIG:Debug>,${VS_POINTCLOUD_ROOT}/Debug/PointCloudProcessor.dll,${VS_POINTCLOUD_ROOT}/Release/PointCloudProcessor.dll>"
       "$<TARGET_FILE_DIR:mock_algo_service>/PointCloudProcessor.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_CURRENT_SOURCE_DIR}/point_cloud_config.json"
       "$<TARGET_FILE_DIR:mock_algo_service>/config.json"
     COMMAND ${CMAKE_COMMAND}
-      -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json
-      -DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json
+      "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
-      -DSRC=${THIRD_PARTY_BIN_DIR}
-      -DSRC_RELEASE=${CMAKE_CURRENT_SOURCE_DIR}/runtime_release_overrides
-      -DWEBP_RELEASE_DIR=G:/ReconDLL/Decode/Release
-      -DDST=$<TARGET_FILE_DIR:mock_algo_service>
+      "-DSRC=${THIRD_PARTY_BIN_DIR}"
+      "-DSRC_RELEASE=${_algo_src_release}"
+      "-DWEBP_RELEASE_DIR=G:/ReconDLL/Decode/Release"
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_release_dlls.cmake"
     COMMENT "Deploy PointCloudProcessor + third-party + MSVC DLLs beside mock_algo_service"
     VERBATIM
@@ -149,13 +162,26 @@ if(VS_HAS_POINTCLOUD_ALGO)
 else()
   add_custom_command(TARGET mock_algo_service POST_BUILD
     COMMAND ${CMAKE_COMMAND}
-      -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json
-      -DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json
+      "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
-      -DDST=$<TARGET_FILE_DIR:mock_algo_service>
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/deploy_msvc_runtime.cmake"
     COMMENT "Deploy MSVC runtime DLLs beside mock_algo_service"
+    VERBATIM
+  )
+endif()
+
+# 仅编算法目标时也同步到 VisualSystem/alg_program（主程序运行目录）
+if(TARGET VisualSystem)
+  add_custom_command(TARGET mock_algo_service POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+      "-DMOCK_DIR=$<TARGET_FILE_DIR:mock_algo_service>"
+      "-DDST_DIR=$<TARGET_FILE_DIR:VisualSystem>/alg_program"
+      "-DDEFAULT_ALGO_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../apps/visual_system/cmake/sync_alg_program.cmake"
+    COMMENT "Sync mock_algo_service runtime into VisualSystem/alg_program"
     VERBATIM
   )
 endif()
