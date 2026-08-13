@@ -170,6 +170,7 @@ struct ShmHeader {
   /** 视觉进程 PID（建映射时写入，便于对照日志）。 */
   std::uint32_t vision_pid = 0;
   std::uint32_t reserved0 = 0;
+  /** 离线回放：会话目录，或单次强制使用的深度文件完整路径（文件存在则算法直接读该文件）。 */
   char session_dir[512]{};
   char error_message[256]{};
   ShmLogResult logs[kLogCount]{};

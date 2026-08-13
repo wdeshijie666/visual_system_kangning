@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QLockFile>
@@ -53,7 +54,7 @@ LONG WINAPI VsUnhandledExceptionFilter(EXCEPTION_POINTERS* pExceptionPointers) {
   wcscat_s(path, L"dumps");
   CreateDirectoryW(path, nullptr);
   WCHAR dump[MAX_PATH];
-  swprintf_s(dump, L"%sdumps\\VisualSystem_%04d%02d%02d.dmp", path, st.wYear, st.wMonth, st.wDay);
+  swprintf_s(dump, L"%sdumps\\SmartGuide_%04d%02d%02d.dmp", path, st.wYear, st.wMonth, st.wDay);
   HANDLE h = CreateFileW(dump, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h != INVALID_HANDLE_VALUE) {
     MINIDUMP_EXCEPTION_INFORMATION info{};
@@ -116,6 +117,8 @@ int main(int argc, char* argv[]) {
 
   QApplication app(argc, argv);
   app.setStyle(QStringLiteral("Fusion"));
+  // 窗口/任务栏图标（与 exe 资源图标同源 SVG）
+  app.setWindowIcon(QIcon(QStringLiteral(":/icons/标题栏/应用Logo.svg")));
   // 配置/数据路径均相对程序目录，避免从 IDE 启动时 CWD 不同读到错误 setting.json
   QDir::setCurrent(QCoreApplication::applicationDirPath());
   ApplyDarkTheme();
@@ -220,7 +223,7 @@ int main(int argc, char* argv[]) {
   stub_options.image_width = settings.simulation.image_width;
   stub_options.image_height = settings.simulation.image_height;
   stub_options.solid_black = true;
-  // 仅 Stub 生效：每次 Capture 读 VisualSystem.exe 旁 sim_test.tiff；真机 RvcCamera 忽略
+  // 仅 Stub 生效：每次 Capture 读 SmartGuide.exe 旁 sim_test.tiff；真机 RvcCamera 忽略
   stub_options.sim_depth_tiff = "sim_test.tiff";
 
   // --- 阶段 0.6：先拉起算法进程并等通道就绪，再连相机 ---

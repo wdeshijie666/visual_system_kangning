@@ -14,13 +14,11 @@
 namespace algo {
 
 /**
- * 每通道独立引擎槽（R05/R09 不共用实例）。
- * 仅在有效深度时惰性创建，同分辨率跨周期复用；空点云不创建。
+ * 每通道引擎槽（R05/R09 不共用实例）。
+ * 有有效深度时每周期先析构再构造，使构造函数重新加载点云/参考点配置。
  */
 struct PointCloudProcessorSlot {
   PointCloudProcessorPtr processor;
-  int last_depth_w = -1;
-  int last_depth_h = -1;
 };
 
 /**
@@ -28,7 +26,7 @@ struct PointCloudProcessorSlot {
  * 若 input_mode=kOfflinePath，则从 session_dir 读 `_depth.*`（毫米），不读 SHM blob。
  * @param channel_pc 非空时优先用该工位点云配置（在线双线程应传入本通道配置）；
  *                   空则按 header.station_id 回退解析。
- * @param slot 非空时使用该通道引擎槽；空则本请求临时构造。
+ * @param slot 非空时写入该通道槽（每周期重建）；空则本请求临时构造。
  * @return false 表示输入无效或算法失败；无有效圆柱仍返回 true（logs 为 NG）。
  */
 bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,

@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDialog>
 #include <QFile>
+#include <QIcon>
 #include <QFileDialog>
 #include <QFrame>
 #include <QLabel>
@@ -33,6 +34,7 @@
 #include "camera_manager_widget.h"
 #include "device_status_widget.h"
 #include "offline_test_widget.h"
+#include "repeatability_test_dialog.h"
 #include "station_result_widget.h"
 #include "viewport_widget.h"
 #include "visual/alarm_service.h"
@@ -173,6 +175,7 @@ void MainWindow::InitUi() {
   LoadTheme();
   // 标题：左产品名，右公司名（标准标题栏用 "—" 分隔）
   setWindowTitle(QStringLiteral("SmartGuide — TanlyMind"));
+  setWindowIcon(QIcon(QStringLiteral(":/icons/标题栏/应用Logo.svg")));
 
   auto* file_menu = menuBar()->addMenu(tr("文件"));
   file_menu->addAction(tr("退出"), this, &QWidget::close);
@@ -184,6 +187,9 @@ void MainWindow::InitUi() {
   offline_menu_ = offline_menu;
   replay_r05_action_ = offline_menu->addAction(tr("历史数据回放 R05"), this, &MainWindow::OnReplayR05);
   replay_r09_action_ = offline_menu->addAction(tr("历史数据回放 R09"), this, &MainWindow::OnReplayR09);
+  offline_menu->addSeparator();
+  repeatability_action_ =
+      offline_menu->addAction(tr("重复精度测试…"), this, &MainWindow::OnRepeatabilityTest);
 
   auto* window_menu = menuBar()->addMenu(tr("视窗"));
   window_menu->addAction(tr("重置视窗"), this, &MainWindow::OnResetWindowLayout);
@@ -746,6 +752,9 @@ void MainWindow::UpdateOfflineTestEnabled(bool enabled) {
   if (replay_r09_action_ != nullptr) {
     replay_r09_action_->setEnabled(allow);
   }
+  if (repeatability_action_ != nullptr) {
+    repeatability_action_->setEnabled(allow);
+  }
   if (offline_menu_ != nullptr) {
     offline_menu_->setToolTipsVisible(true);
     if (offline_op_busy_) {
@@ -901,4 +910,22 @@ void MainWindow::OnReplayR05() {
 
 void MainWindow::OnReplayR09() {
   RunHistoricalReplay(visual::StationId::kR09);
+}
+
+void MainWindow::OnRepeatabilityTest() {
+  if (!engine_) {
+    return;
+  }
+  if (offline_op_busy_) {
+    statusBar()->showMessage(tr("手动或回放进行中，请等待结束"), 5000);
+    return;
+  }
+  if (engine_->IsRunning()) {
+    statusBar()->showMessage(tr("产线运行中，请先停止后再做精度测试"), 5000);
+    return;
+  }
+  auto* dlg = new RepeatabilityTestDialog(engine_, this);
+  dlg->setAttribute(Qt::WA_DeleteOnClose);
+  connect(dlg, &RepeatabilityTestDialog::BusyChanged, this, &MainWindow::SetOfflineOpBusy);
+  dlg->show();
 }

@@ -3,7 +3,8 @@
  * @brief 点云算法：SHM / 离线 session 深度 / 临时 TIFF → 按工位配置创建的 PointCloudProcessor → 5 条结果。
  *
  * SHM 深度单位为米，固定换算为毫米后再计算；磁盘 TIFF/PGM（含历史回放）已是毫米。
- * PointCloudProcessor 配置文件与 topN 取自 algo_config.json 的 channels.r05/r09。
+ * PointCloudProcessor 配置与 topN 取自 algo_config.json 的 channels.r05/r09；
+ * 参考点 JSON 取自顶层 referencePointConfig（两工位共用）。
  */
 #include "algo_pointcloud_runner.h"
 
@@ -376,6 +377,46 @@ std::filesystem::path ResolvePointCloudConfig(const PointCloudAlgoOptions& pc,
   return exe_dir / "config.json";
 }
 
+/** 两工位共用参考点；相对路径相对算法 exe 目录解析。 */
+std::filesystem::path ResolveReferencePointConfig(const AlgoConfig& config,
+                                                  const std::filesystem::path& exe_dir) {
+  const std::string& configured = config.reference_point_config;
+  if (!configured.empty()) {
+    std::filesystem::path p(configured);
+    if (p.is_absolute()) {
+      return p;
+    }
+    return exe_dir / p;
+  }
+  return exe_dir / "reference_point.json";
+}
+
+/**
+ * 创建引擎：点云参数文件必须存在；参考点文件缺失只警告，仍构造（库默认约 0,0,0）。
+ */
+PointCloudProcessorPtr CreateProcessorWithReference(const std::filesystem::path& cfg_path,
+                                                    const std::filesystem::path& ref_path,
+                                                    std::string* error) {
+  if (!std::filesystem::exists(cfg_path)) {
+    if (error) {
+      *error = "算法配置文件缺失: " + cfg_path.string();
+    }
+    return nullptr;
+  }
+  if (!std::filesystem::exists(ref_path)) {
+    AlgoWarn("参考点文件缺失，将使用算法库默认参考点: " + ref_path.string());
+  }
+  std::string create_error;
+  auto proc = CreatePointCloudProcessorProtected(cfg_path.string(), ref_path.string(), &create_error);
+  if (!proc) {
+    if (error) {
+      *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
+    }
+    return nullptr;
+  }
+  return proc;
+}
+
 }  // namespace
 
 bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_arena,
@@ -408,12 +449,9 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
     AlgoDebug("使用临时深度图: " + config.temp_force_depth_tiff);
   } else if (offline_path) {
-    // 历史回放：只读磁盘，不走 SHM blob，避免影响在线 PickFirstDepth 通路
-    const std::filesystem::path session_dir(header->session_dir);
-    const std::string station_tag = StationTagFromShmId(header->station_id);
-    const std::string camera_id = FirstCameraIdFromHeader(header);
+    // 历史回放：只读磁盘；session_dir 可能是目录或强制指定的深度文件路径
     std::filesystem::path depth_path;
-    if (!FindDepthFileInSession(session_dir, station_tag, camera_id, &depth_path, error)) {
+    if (!ResolveOfflineDepthPath(header, &depth_path, error)) {
       return false;
     }
     if (!LoadDepthTiffFile(depth_path, &depth, error)) {
@@ -421,8 +459,23 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
     }
     AlgoInfo("离线深度已加载: " + depth_path.string());
 
+    // 灰度：优先同前缀 _gray.；否则按父目录旧规则扫描
     std::filesystem::path gray_path;
-    if (FindGrayFileInSession(session_dir, station_tag, camera_id, &gray_path)) {
+    const std::string depth_name = depth_path.filename().string();
+    const auto pos = depth_name.find("_depth.");
+    if (pos != std::string::npos) {
+      const std::string gray_name = depth_name.substr(0, pos) + "_gray.pgm";
+      const auto candidate = depth_path.parent_path() / gray_name;
+      if (std::filesystem::exists(candidate)) {
+        gray_path = candidate;
+      }
+    }
+    if (gray_path.empty()) {
+      const std::string station_tag = StationTagFromShmId(header->station_id);
+      const std::string camera_id = FirstCameraIdFromHeader(header);
+      FindGrayFileInSession(depth_path.parent_path(), station_tag, camera_id, &gray_path);
+    }
+    if (!gray_path.empty()) {
       if (LoadGrayImageFile(gray_path, &offline_gray)) {
         AlgoDebug("离线灰度已加载: " + gray_path.string());
       }
@@ -454,6 +507,7 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
   }
 
   const auto cfg_path = ResolvePointCloudConfig(pc, exe_dir);
+  const auto ref_path = ResolveReferencePointConfig(config, exe_dir);
   PointCloudProcessorPtr owned;
   PointCloudProcessor* proc = nullptr;
 
@@ -487,48 +541,17 @@ bool RunPointCloudFromShm(visual::shm::ShmHeader* header, std::uint8_t* blob_are
               " 有效像素=" + std::to_string(positive_depth));
 
     if (slot != nullptr) {
-      if (slot->processor != nullptr &&
-          (slot->last_depth_w != depth.cols || slot->last_depth_h != depth.rows)) {
-        // 运行中不析构旧实例；分辨率变化时请重启算法进程。
-        if (error) {
-          *error = "深度分辨率变化，请重启算法进程";
-        }
+      // 每周期重建：点云参数与参考点在构造函数中刷新，支持现场热改配置。
+      slot->processor.reset();
+      slot->processor = CreateProcessorWithReference(cfg_path, ref_path, error);
+      if (!slot->processor) {
         return false;
       }
-      if (slot->processor == nullptr) {
-        if (!std::filesystem::exists(cfg_path)) {
-          if (error) {
-            *error = "算法配置文件缺失: " + cfg_path.string();
-          }
-          return false;
-        }
-        std::string create_error;
-        slot->processor = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
-        if (!slot->processor) {
-          if (error) {
-            *error =
-                create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
-          }
-          return false;
-        }
-        slot->last_depth_w = depth.cols;
-        slot->last_depth_h = depth.rows;
-        AlgoDebug("已加载算法参数: " + cfg_path.string());
-      }
+      AlgoDebug("本周期已重建算法引擎: " + cfg_path.string() + "；参考点: " + ref_path.string());
       proc = slot->processor.get();
     } else {
-      if (!std::filesystem::exists(cfg_path)) {
-        if (error) {
-          *error = "算法配置文件缺失: " + cfg_path.string();
-        }
-        return false;
-      }
-      std::string create_error;
-      owned = CreatePointCloudProcessorProtected(cfg_path.string(), &create_error);
+      owned = CreateProcessorWithReference(cfg_path, ref_path, error);
       if (!owned) {
-        if (error) {
-          *error = create_error.empty() ? ("算法引擎加载失败: " + cfg_path.string()) : create_error;
-        }
         return false;
       }
       proc = owned.get();

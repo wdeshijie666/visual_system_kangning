@@ -3,6 +3,7 @@
   "usePointCloudAlgo": true,
   "pointCloudConfig": "config.json",
   "pointCloudTopN": 5,
+  "referencePointConfig": "reference_point.json",
   "logLevel": "info",
   "tempForceDepthTiff": "",
   "debugSaveDepth": false,

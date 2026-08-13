@@ -12,6 +12,7 @@ set(_vs_app_sources
   src/camera_recipe_paths.cpp
   src/viewport_widget.cpp
   src/offline_test_widget.cpp
+  src/repeatability_test_dialog.cpp
 )
 
 set(_vs_app_headers
@@ -24,6 +25,7 @@ set(_vs_app_headers
   include/camera_recipe_paths.h
   include/viewport_widget.h
   include/offline_test_widget.h
+  include/repeatability_test_dialog.h
 )
 
 if(WIN32)
@@ -31,6 +33,9 @@ if(WIN32)
 else()
   add_executable(VisualSystem ${_vs_app_sources} ${_vs_app_headers})
 endif()
+
+# CMake 目标名仍为 VisualSystem；产物文件名为 SmartGuide.exe
+set_target_properties(VisualSystem PROPERTIES OUTPUT_NAME SmartGuide)
 
 target_include_directories(VisualSystem PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -50,11 +55,26 @@ target_link_libraries(VisualSystem
     Qt5::Widgets
     Qt5::Gui
     Qt5::Network
+    Qt5::Svg
     DbgHelp
 )
 
 qt5_add_resources(VS_RESOURCES ../../resources/resources.qrc)
-target_sources(VisualSystem PRIVATE ${VS_RESOURCES})
+qt5_add_resources(VS_APP_ICON_RESOURCES resources/app_icons.qrc)
+target_sources(VisualSystem PRIVATE ${VS_RESOURCES} ${VS_APP_ICON_RESOURCES})
+
+if(WIN32)
+  # 嵌入 exe 图标：ico 与生成的 .rc 同目录，避免 RC 对绝对/中文路径不友好
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/app_icon.ico"
+    "${CMAKE_CURRENT_BINARY_DIR}/app_icon.ico"
+    COPYONLY)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+    COPYONLY)
+  target_sources(VisualSystem PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+endif()
 
 if(MSVC)
   target_compile_options(VisualSystem PRIVATE /utf-8)

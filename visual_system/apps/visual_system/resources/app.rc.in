@@ -1,0 +1,2 @@
+// SmartGuide 可执行文件图标；与本文件同目录的 app_icon.ico 由 CMake 拷贝到构建目录。
+IDI_ICON1 ICON "app_icon.ico"

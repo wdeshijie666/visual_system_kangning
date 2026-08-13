@@ -1,8 +1,8 @@
 # deploy_exe_runtime.cmake
-# 将 VisualSystem.exe 运行依赖部署到 exe 同目录，便于整目录拷贝到客户机运行。
+# 将 SmartGuide.exe（CMake 目标 VisualSystem）运行依赖部署到 exe 同目录，便于整目录拷贝到客户机运行。
 # 参数：-DEXE= -DQT_BIN= -DRVC_RUNTIME= -DPLCTAG_DLL=（可选）
 if(NOT EXE OR NOT EXISTS "${EXE}")
-  message(FATAL_ERROR "deploy_exe_runtime.cmake requires -DEXE= existing VisualSystem.exe")
+  message(FATAL_ERROR "deploy_exe_runtime.cmake requires -DEXE= existing SmartGuide.exe")
 endif()
 
 get_filename_component(DST "${EXE}" DIRECTORY)

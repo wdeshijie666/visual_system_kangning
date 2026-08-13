@@ -151,6 +151,10 @@ if(VS_HAS_POINTCLOUD_ALGO)
       "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
+      "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/reference_point.json"
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/reference_point.json"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
+    COMMAND ${CMAKE_COMMAND}
       "-DSRC=${THIRD_PARTY_BIN_DIR}"
       "-DSRC_RELEASE=${_algo_src_release}"
       "-DWEBP_RELEASE_DIR=G:/ReconDLL/Decode/Release"
@@ -164,6 +168,10 @@ else()
     COMMAND ${CMAKE_COMMAND}
       "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/algo_config.json"
       "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/algo_config.json"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
+    COMMAND ${CMAKE_COMMAND}
+      "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/reference_point.json"
+      "-DDST=$<TARGET_FILE_DIR:mock_algo_service>/reference_point.json"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/copy_algo_config_if_missing.cmake"
     COMMAND ${CMAKE_COMMAND}
       "-DDST=$<TARGET_FILE_DIR:mock_algo_service>"

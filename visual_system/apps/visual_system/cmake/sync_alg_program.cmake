@@ -1,5 +1,5 @@
 # 同步 mock_algo_service 运行目录到 VisualSystem/alg_program。
-# 若目标侧已有 algo_config.json，则保留现场修改，不被默认模板覆盖。
+# 若目标侧已有 algo_config.json / reference_point.json，则保留现场修改，不被默认模板覆盖。
 #
 # 变量：MOCK_DIR, DST_DIR, DEFAULT_ALGO_CONFIG
 
@@ -22,10 +22,22 @@ if(EXISTS "${_dst_cfg}")
   set(_had_user TRUE)
 endif()
 
+# 参考点多为现场标定，已有则备份后跳过覆盖
+set(_dst_ref "${DST_DIR}/reference_point.json")
+set(_bak_ref "${DST_DIR}/.reference_point.user.json")
+set(_had_ref FALSE)
+if(EXISTS "${_dst_ref}")
+  configure_file("${_dst_ref}" "${_bak_ref}" COPYONLY)
+  set(_had_ref TRUE)
+endif()
+
 file(GLOB _entries "${MOCK_DIR}/*")
 foreach(_entry ${_entries})
   get_filename_component(_name "${_entry}" NAME)
   if(_name STREQUAL "algo_config.json" AND _had_user)
+    continue()
+  endif()
+  if(_name STREQUAL "reference_point.json" AND _had_ref)
     continue()
   endif()
   file(COPY "${_entry}" DESTINATION "${DST_DIR}")
@@ -35,4 +47,8 @@ if(_had_user AND EXISTS "${_bak}")
   configure_file("${_bak}" "${_dst_cfg}" COPYONLY)
 elseif(NOT EXISTS "${_dst_cfg}")
   configure_file("${DEFAULT_ALGO_CONFIG}" "${_dst_cfg}" COPYONLY)
+endif()
+
+if(_had_ref AND EXISTS "${_bak_ref}")
+  configure_file("${_bak_ref}" "${_dst_ref}" COPYONLY)
 endif()

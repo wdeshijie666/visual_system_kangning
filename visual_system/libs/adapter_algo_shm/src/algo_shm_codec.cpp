@@ -82,7 +82,17 @@ bool WriteRequestToShm(ShmHeader* header, std::uint8_t* blob_arena, std::size_t 
   std::memset(header->cameras, 0, sizeof(header->cameras));
 
   if (req.input_mode == AlgoInputMode::kOfflinePath) {
-    std::strncpy(header->session_dir, req.session_dir.c_str(), sizeof(header->session_dir) - 1);
+    // 优先传具体深度文件路径（精度测试多文件同目录、以及视觉侧已选定的文件）；
+    // 若无 depth_path 则仍传会话目录，由算法自行扫描。
+    std::string offline_path = req.session_dir;
+    for (std::int32_t i = 0; i < camera_count; ++i) {
+      const auto& cap = req.captures[static_cast<std::size_t>(i)];
+      if (!cap.depth_path.empty()) {
+        offline_path = cap.depth_path;
+        break;
+      }
+    }
+    std::strncpy(header->session_dir, offline_path.c_str(), sizeof(header->session_dir) - 1);
     for (std::int32_t i = 0; i < camera_count; ++i) {
       const auto& cap = req.captures[static_cast<std::size_t>(i)];
       std::strncpy(header->cameras[i].camera_serial, cap.camera_serial.c_str(),

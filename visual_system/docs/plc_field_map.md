@@ -6,8 +6,8 @@
 
 | Tag 名（默认） | 方向 | 类型 | 长度 |
 |----------------|------|------|------|
-| `PLCToCamera_Int` | PLC → 视觉 | DINT 数组 | [0..99] |
-| `CameraToPLC_Int` | 视觉 → PLC | DINT 数组 | [0..99] |
+| `PLCToCamera_Int` | PLC → 视觉 | INT 数组 | [0..99] |
+| `CameraToPLC_Int` | 视觉 → PLC | INT 数组 | [0..99] |
 
 Tag 名可在 `config/setting.json` → `plc.tags` 覆盖。
 
@@ -37,7 +37,7 @@ Tag 名可在 `config/setting.json` → `plc.tags` 覆盖。
 
 ## Log 结果区 CameraToPLC_Int
 
-每工位 **5 根 Log**，每根 **6 个 DINT 字段**（Status, X, Y, R, Diameter, Length）。
+每工位 **5 根 Log**，每根 **6 个 INT 字段**（Status, X, Y, R, Diameter, Length）。
 
 | 工位 | 起始下标 | 结束下标 | Log 编号 |
 |------|----------|----------|----------|
@@ -50,7 +50,7 @@ Tag 名可在 `config/setting.json` → `plc.tags` 覆盖。
 | 偏移 | 字段 | 单位/刻度 |
 |------|------|-----------|
 | +0 | Status | 0=Default, 1=OK, 2=NG, 3=NotLog |
-| +1 | Offset X | mm × 100（整数 DINT） |
+| +1 | Offset X | mm × 100（整数 INT） |
 | +2 | Offset Y | mm × 100 |
 | +3 | Offset R | deg × 100 |
 | +4 | Diameter | mm × 10 |

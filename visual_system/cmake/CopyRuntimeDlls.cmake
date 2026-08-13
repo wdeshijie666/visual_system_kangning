@@ -37,7 +37,7 @@ function(vs_copy_runtime_dlls target)
     endif()
   endif()
 
-  # Stub 读 sim_test.tiff 链接了 OpenCV 4.12；部署到 VisualSystem.exe 旁
+  # Stub 读 sim_test.tiff 链接了 OpenCV 4.12；部署到 SmartGuide.exe 旁
   set(_opencv_bin "")
   foreach(_cand IN ITEMS
       "${VS_RECON_THIRD_PARTY_ROOT}/bin"

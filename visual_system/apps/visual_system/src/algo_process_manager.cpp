@@ -233,6 +233,10 @@ bool AlgoProcessManager::SyncAlgoConfigFile() {
   if (!root.contains(QStringLiteral("pointCloudTopN"))) {
     root.insert(QStringLiteral("pointCloudTopN"), default_top_n);
   }
+  // 两工位共用参考点；已有现场值则保留
+  if (!root.contains(QStringLiteral("referencePointConfig"))) {
+    root.insert(QStringLiteral("referencePointConfig"), QStringLiteral("reference_point.json"));
+  }
 
   const auto merge_channel_point_cloud = [&](QJsonObject* ch, const QString& key) {
     if (ch == nullptr) {

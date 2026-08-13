@@ -55,13 +55,17 @@ bool ValidateConfigFile(const std::string& config_path, std::string* error) {
 
 }  // namespace
 
-PointCloudProcessorPtr CreatePointCloudProcessorProtected(const std::string& config_path,
-                                                          std::string* error) {
+PointCloudProcessorPtr CreatePointCloudProcessorProtected(
+    const std::string& config_path, const std::string& reference_point_path, std::string* error) {
   if (!ValidateConfigFile(config_path, error)) {
     return nullptr;
   }
   try {
-    return PointCloudProcessorPtr(new PointCloudProcessor(config_path));
+    // 第二参数显式传入，避免依赖进程 cwd；空串时库内默认 "reference_point.json"。
+    if (reference_point_path.empty()) {
+      return PointCloudProcessorPtr(new PointCloudProcessor(config_path));
+    }
+    return PointCloudProcessorPtr(new PointCloudProcessor(config_path, reference_point_path));
   } catch (const std::exception& ex) {
     if (error) {
       *error = std::string("算法引擎构造异常: ") + ex.what();
